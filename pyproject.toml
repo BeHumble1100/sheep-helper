@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sheep-helper"
+version = "0.1.0"
+description = "Offline, privacy-first layout extraction for tile-match game captures"
+requires-python = ">=3.10"
+dependencies = ["Pillow>=10,<13"]
+
+[project.optional-dependencies]
+capture = ["mitmproxy>=11,<12"]
+
+[project.scripts]
+sheep-helper = "sheep_helper.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,40 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Build outputs
+build/
+dist/
+*.spec
+*.egg-info/
+
+# Runtime captures may contain session-specific data. Selected redacted test
+# fixtures are force-added to Git explicitly.
+captured-layouts/
+
+# Reverse-engineering and third-party working trees
+unpacked/
+vendor/
+
+# Local proxy/certificate material and logs
+*.pem
+*.p12
+*.pfx
+*.cer
+*.crt
+*.key
+*.log
+.env
+.env.*
+
+# Editor and OS state
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
