@@ -22,7 +22,7 @@ from tkinter import messagebox
 from PIL import ImageGrab
 
 from .card_faces import board_region, face_name
-from .capture_state import CAPTURE_DONE_MARKER, CAPTURE_FORMAT_VERSION
+from .capture_state import CAPTURE_DONE_MARKER
 from .live import GuidedPlay, fetch_missing_map, find_captured_game, load_verified_plan, prepare_captured_game, solve_prepared_game
 from .solver import Board
 from .system_proxy import CaptureProxy, recover_stale_proxy
@@ -173,18 +173,12 @@ def _start_capture(capture_dir: Path, *, port: int = CAPTURE_PORT) -> subprocess
         owned_pid = _owned_capture_pid(capture_dir, port)
         if owned_pid is None:
             raise RuntimeError(f"抓包端口 {port} 已被其他进程占用；请先关闭旧监听器")
-        status_path = capture_dir / "game-capture-status.json"
-        try:
-            status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.is_file() else None
-        except (OSError, ValueError):
-            status = None
-        if (status is None or
-                (status.get("capture_format_version") == CAPTURE_FORMAT_VERSION
-                 and status.get("listener_pid") == owned_pid)):
-            return None  # Keep WeChat online while capturing a new game.
-        # A previously packaged addon cannot learn the new runtime-card
-        # extractor merely because the GUI EXE was replaced. Restart only our
-        # verified listener, before the user enters the next game.
+        # A listener left by a previous GUI process may still accept TCP while
+        # its one-file extraction directory and addon runtime are already
+        # gone. Never reuse it across app launches: restart only the listener
+        # whose command line and capture directory we verified above. Within
+        # one GUI process ``self.capture_process`` is retained, so consecutive
+        # capture cycles still reuse the healthy current listener.
         if owned_pid == os.getpid():
             raise RuntimeError("抓包进程识别异常；未关闭当前程序")
         os.kill(owned_pid, signal.SIGTERM)

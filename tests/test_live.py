@@ -358,13 +358,15 @@ class LiveGuideTests(unittest.TestCase):
             self.assertIn("OwningProcess -eq 41", command)
             self.assertEqual(run.call_args.kwargs["timeout"], 12)
 
-    def test_existing_owned_listener_is_reused_without_network_interruption(self) -> None:
+    def test_listener_from_previous_app_session_is_restarted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            with patch("sheep_helper.guide_ui._port_running", return_value=True), patch(
+            with patch("sheep_helper.guide_ui._port_running", side_effect=[True, False]), patch(
                     "sheep_helper.guide_ui._owned_capture_pid", return_value=41), patch(
-                    "sheep_helper.guide_ui.subprocess.Popen") as launch:
-                self.assertIsNone(_start_capture(Path(directory)))
-                launch.assert_not_called()
+                    "sheep_helper.guide_ui.os.kill") as stop, patch(
+                    "sheep_helper.guide_ui.shutil.which", return_value=None):
+                with self.assertRaisesRegex(RuntimeError, "mitmdump"):
+                    _start_capture(Path(directory))
+                stop.assert_called_once()
 
     def test_stale_owned_listener_is_restarted_before_a_new_capture(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
