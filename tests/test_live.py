@@ -342,6 +342,22 @@ class LiveGuideTests(unittest.TestCase):
             self.assertEqual(_owned_capture_pid(folder, 18888), 41)
             self.assertIsNone(_owned_capture_pid(folder, 18889))
 
+    def test_listener_ownership_prefers_the_addon_status_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "game-capture-status.json").write_text(
+                json.dumps({"capture_format_version": 2, "listener_pid": 41}), encoding="utf-8"
+            )
+            row = {"ProcessId": 41, "CommandLine":
+                   f"mitmdump.exe --listen-port 18888 -s game_capture_addon.py "
+                   f"--set game_capture_dir={folder} -s seed_recovery_addon.py"}
+            with patch("sheep_helper.guide_ui.subprocess.run",
+                       return_value=Mock(stdout=json.dumps(row))) as run:
+                self.assertEqual(_owned_capture_pid(folder, 18888), 41)
+            command = run.call_args.args[0][-1]
+            self.assertIn("OwningProcess -eq 41", command)
+            self.assertEqual(run.call_args.kwargs["timeout"], 12)
+
     def test_existing_owned_listener_is_reused_without_network_interruption(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with patch("sheep_helper.guide_ui._port_running", return_value=True), patch(

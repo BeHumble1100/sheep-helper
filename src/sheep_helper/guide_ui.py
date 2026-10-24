@@ -112,34 +112,60 @@ def _capture_confdir() -> Path:
 
 def _owned_capture_pid(capture_dir: Path, port: int) -> int | None:
     """Identify only the helper's own listening process, not a launcher wrapper."""
-    command = (
-        f"Get-NetTCPConnection -LocalPort {port} -State Listen | "
-        "ForEach-Object { Get-CimInstance Win32_Process "
-        "-Filter \"ProcessId = $($_.OwningProcess)\" } | "
-        "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
-    )
+    preferred_pid = None
     try:
-        result = subprocess.run(["powershell", "-NoProfile", "-Command", command],
-                                capture_output=True, text=True, timeout=6, check=True)
-        rows = json.loads(result.stdout) if result.stdout.strip() else []
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return None
-    if isinstance(rows, dict):
-        rows = [rows]
-    if not isinstance(rows, list):
-        return None
+        status = json.loads((capture_dir / "game-capture-status.json").read_text(encoding="utf-8"))
+        candidate = status.get("listener_pid") if isinstance(status, dict) else None
+        if type(candidate) is int and candidate > 0:
+            preferred_pid = candidate
+    except (OSError, ValueError):
+        pass
+
+    def query(pid: int | None) -> list[dict[str, object]]:
+        if pid is not None:
+            # Query the PID recorded by our addon first. Enumerating every TCP
+            # owner and then asking CIM about each one can exceed the old six
+            # second timeout on otherwise healthy Windows installations.
+            command = (
+                f"$listener = Get-NetTCPConnection -LocalPort {port} -State Listen "
+                f"-ErrorAction SilentlyContinue | Where-Object {{ $_.OwningProcess -eq {pid} }} "
+                "| Select-Object -First 1; "
+                f"if ($null -ne $listener) {{ Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\" "
+                "| Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress }"
+            )
+        else:
+            command = (
+                f"$owners = @(Get-NetTCPConnection -LocalPort {port} -State Listen "
+                "-ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique); "
+                "$rows = foreach ($ownerPid in $owners) { Get-CimInstance Win32_Process "
+                "-Filter \"ProcessId = $ownerPid\" | Select-Object ProcessId,CommandLine }; "
+                "$rows | ConvertTo-Json -Compress"
+            )
+        try:
+            result = subprocess.run(["powershell", "-NoProfile", "-Command", command],
+                                    capture_output=True, text=True, timeout=12, check=True)
+            rows = json.loads(result.stdout) if result.stdout.strip() else []
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return []
+        if isinstance(rows, dict):
+            return [rows]
+        return rows if isinstance(rows, list) else []
+
     directory = str(capture_dir.resolve()).casefold()
-    matching = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        args = str(row.get("CommandLine") or "").casefold()
-        if (f"--listen-port {port}" in args
-                and "game_capture_addon.py" in args
-                and "seed_recovery_addon.py" in args
-                and f"game_capture_dir={directory}" in args):
-            matching.append(row.get("ProcessId"))
-    return matching[0] if len(matching) == 1 and type(matching[0]) is int else None
+    for requested_pid in ((preferred_pid, None) if preferred_pid is not None else (None,)):
+        matching = []
+        for row in query(requested_pid):
+            if not isinstance(row, dict):
+                continue
+            args = str(row.get("CommandLine") or "").casefold()
+            if (f"--listen-port {port}" in args
+                    and "game_capture_addon.py" in args
+                    and "seed_recovery_addon.py" in args
+                    and f"game_capture_dir={directory}" in args):
+                matching.append(row.get("ProcessId"))
+        if len(matching) == 1 and type(matching[0]) is int:
+            return matching[0]
+    return None
 
 
 def _start_capture(capture_dir: Path, *, port: int = CAPTURE_PORT) -> subprocess.Popen[bytes] | None:
