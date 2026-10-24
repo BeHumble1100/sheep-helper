@@ -272,6 +272,39 @@ class LiveGuideTests(unittest.TestCase):
                 app.close()
 
     @unittest.skipUnless(sys.platform == "win32", "Windows guide only")
+    def test_daily_fresh_seed_route_is_available(self) -> None:
+        folder = ROOT / "captured-layouts" / "session-1792645497862" / "verified"
+        source = next(folder.glob("*.cards.json"))
+        board = Board.from_files(source, next(folder.glob("*.coverage.json")))
+        plan = load_verified_plan(board, next(folder.glob("*.guide-solution.json")))
+        with tempfile.TemporaryDirectory() as directory:
+            capture_dir = Path(directory)
+            record = json.loads(source.read_text(encoding="utf-8"))
+            record["verification_mode"] = "client-seed-fresh"
+            cards = capture_dir / "fresh.cards.json"
+            cards.write_text(json.dumps(record), encoding="utf-8")
+            app = GuideApp(capture_dir=capture_dir, start_capture=False)
+            try:
+                app._set_guide(board, plan, cards, capture_dir / "progress.json",
+                               target_label="每日关卡")
+                self.assertTrue(app.face_verified)
+                self.assertEqual(app.route_badge.get(), "每日 · 新局种子")
+            finally:
+                app.close()
+
+    def test_dynamic_faces_do_not_use_a_static_solution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            record = json.loads(CARDS.read_text(encoding="utf-8"))
+            record["tiles"][0]["meta_type"] = 2
+            cards = folder / "dynamic.cards.json"
+            cards.write_text(json.dumps(record), encoding="utf-8")
+            capture = CapturedGame(folder / "seed.json", folder / "map.map", MAP_ID, 80002, len(record["tiles"]))
+            prepared = PreparedGame(capture, folder / "layout.json", COVERAGE, cards, SOLUTION)
+            with self.assertRaisesRegex(ValueError, "静态路线不适用"):
+                solve_prepared_game(prepared)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows guide only")
     def test_daily_waits_for_manual_first_level_even_if_faces_are_unverified(self) -> None:
         folder = ROOT / "captured-layouts" / "session-1792637807477" / "verified"
         cards = next(folder.glob("*.cards.json"))

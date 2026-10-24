@@ -71,6 +71,11 @@ def assemble_session(
             tile["type"] = card_type
             tile["face_resource"] = f"block/daily/block_{card_type}"
         cards["verification_mode"] = "server-runtime"
+    elif (record.get("match_data_present") is False
+          and record.get("method") in {"local-known-plaintext-ofb-probe", "plain-seed-response"}):
+        # A fresh game has no server snapshot. The client assigns every face
+        # from this seed and the map's type pool; backflow games use match_data.
+        cards["verification_mode"] = "client-seed-fresh"
     coverage = build_coverage(layout)
     if len(cards["tiles"]) != len(coverage["tiles"]):
         raise ValueError("牌面数与遮挡图不一致")
@@ -122,10 +127,26 @@ def write_session(
         output_dir / f"{map_id}.cards.json",
     )
     serialized = [json.dumps(payload, ensure_ascii=False, indent=2) for payload in (layout, coverage, cards)]
-    for path, content in zip(outputs, serialized):
-        if path.exists() and path.read_text(encoding="utf-8") != content:
-            raise FileExistsError(f"已有不同版本的会话文件，拒绝覆盖：{path}")
-    for path, content in zip(outputs, serialized):
+    for index, (path, content) in enumerate(zip(outputs, serialized)):
         if not path.exists():
+            continue
+        existing = path.read_text(encoding="utf-8")
+        if existing == content:
+            continue
+        if index == 2 and cards.get("verification_mode") == "client-seed-fresh":
+            previous = json.loads(existing)
+            upgraded = dict(cards)
+            upgraded.pop("verification_mode")
+            if previous == upgraded:
+                continue
+        raise FileExistsError(f"已有不同版本的会话文件，拒绝覆盖：{path}")
+    for index, (path, content) in enumerate(zip(outputs, serialized)):
+        if path.exists():
+            if index != 2 or path.read_text(encoding="utf-8") == content:
+                continue
+            temporary = path.with_suffix(".cards.json.tmp")
+            temporary.write_text(content, encoding="utf-8")
+            temporary.replace(path)
+        else:
             path.write_text(content, encoding="utf-8")
     return outputs

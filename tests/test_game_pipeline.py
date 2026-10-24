@@ -138,6 +138,33 @@ class GamePipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "坐标不一致"):
                 assemble_session(source, seed_path)
 
+    def test_fresh_seed_faces_are_marked_and_existing_session_is_upgraded(self) -> None:
+        map_id = "64510ca5ca10058da0ca36f5d02fe9bf"
+        source = ROOT / "captured-layouts" / f"{map_id}.map"
+        historical = json.loads((ROOT / "captured-layouts" / f"{map_id}.cards.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            seed_path = folder / "seed.json"
+            record = {"map_md5": [map_id], "map_seed": historical["map_seed"]}
+            seed_path.write_text(json.dumps(record), encoding="utf-8")
+            *_, cards_path = write_session(source, seed_path, folder)
+            self.assertNotIn("verification_mode", json.loads(cards_path.read_text(encoding="utf-8")))
+
+            record.update({"match_data_present": False, "method": "unverified-import"})
+            seed_path.write_text(json.dumps(record), encoding="utf-8")
+            self.assertNotIn("verification_mode", assemble_session(source, seed_path)[2])
+
+            record["method"] = "local-known-plaintext-ofb-probe"
+            seed_path.write_text(json.dumps(record), encoding="utf-8")
+            write_session(source, seed_path, folder)
+            self.assertEqual(json.loads(cards_path.read_text(encoding="utf-8"))["verification_mode"],
+                             "client-seed-fresh")
+
+            record["match_data_present"] = True
+            seed_path.write_text(json.dumps(record), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "未能解包"):
+                assemble_session(source, seed_path)
+
     def test_session_pipeline_matches_historical_cards_and_coverage(self) -> None:
         map_id = "64510ca5ca10058da0ca36f5d02fe9bf"
         source = ROOT / "captured-layouts" / f"{map_id}.map"

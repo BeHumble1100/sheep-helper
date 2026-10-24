@@ -308,6 +308,8 @@ class GuideApp:
                                           if proxy_recovery_error else
                                           "点击「开始抓包」，再开启新局；第一关请自行通关"))
         self.step_text = tk.StringVar(value="尚无完整路线 · 先开始抓包")
+        self.route_badge = tk.StringVar(value="等待新局")
+        self.progress_text = tk.StringVar(value="路线待生成")
         self.center_x = tk.DoubleVar(value=180)
         self.center_y = tk.DoubleVar(value=250)
         self.cell_px = tk.DoubleVar(value=42)
@@ -341,8 +343,10 @@ class GuideApp:
         titles.pack(side="left")
         tk.Label(titles, text="星球通关指引", font=("Microsoft YaHei UI", 17, "bold"),
                  fg=TEXT, bg=BG).pack(anchor="w")
-        tk.Label(titles, text="只提示下一步 · 不代替点击", font=("Microsoft YaHei UI", 9),
+        tk.Label(titles, text="逐步标记 · 可选自动点击", font=("Microsoft YaHei UI", 9),
                  fg=MUTED, bg=BG).pack(anchor="w")
+        tk.Label(header, textvariable=self.route_badge, font=("Microsoft YaHei UI", 9, "bold"),
+                 fg=ACCENT, bg=PANEL, padx=10, pady=6).pack(side="right")
 
         status_card = tk.Frame(self.root, bg=PANEL, padx=16, pady=12)
         status_card.pack(fill="x", padx=20, pady=(0, 12))
@@ -353,10 +357,18 @@ class GuideApp:
 
         step_card = tk.Frame(self.root, bg=PANEL, padx=16, pady=12)
         step_card.pack(fill="x", padx=20, pady=(0, 14))
-        tk.Label(step_card, text="下一步", font=("Microsoft YaHei UI", 9, "bold"),
-                 fg=ACCENT, bg=PANEL).pack(anchor="w")
+        step_header = tk.Frame(step_card, bg=PANEL)
+        step_header.pack(fill="x")
+        tk.Label(step_header, text="下一步", font=("Microsoft YaHei UI", 9, "bold"),
+                 fg=ACCENT, bg=PANEL).pack(side="left")
+        tk.Label(step_header, textvariable=self.progress_text, font=("Microsoft YaHei UI", 9),
+                 fg=MUTED, bg=PANEL).pack(side="right")
         tk.Label(step_card, textvariable=self.step_text, wraplength=405, justify="left",
                  font=("Microsoft YaHei UI", 12, "bold"), fg=TEXT, bg=PANEL).pack(anchor="w", pady=(5, 0))
+        self.progress_bar = tk.Canvas(step_card, height=4, bg="#263a52", highlightthickness=0)
+        self.progress_bar.pack(fill="x", pady=(12, 0))
+        self.progress_fill = self.progress_bar.create_rectangle(0, 0, 0, 4, fill=ACCENT, outline="")
+        self.progress_bar.bind("<Configure>", lambda _event: self._paint_progress())
 
         actions = tk.Frame(self.root, bg=BG)
         actions.pack(fill="x", padx=20)
@@ -418,6 +430,16 @@ class GuideApp:
         tk.Label(self.root, text="若点错、换局或标记不准，请立即暂停。",
                  font=("Microsoft YaHei UI", 9), fg="#ffaaa4", bg=BG).pack(anchor="w", padx=20)
 
+    def _paint_progress(self) -> None:
+        fraction = (self.guide.confirmed / len(self.guide.plan)
+                    if self.guide is not None and self.guide.plan else 0.0)
+        self.progress_bar.coords(self.progress_fill, 0, 0, round(self.progress_bar.winfo_width() * fraction), 4)
+
+    def _update_progress(self) -> None:
+        self.progress_text.set(f"{self.guide.confirmed} / {len(self.guide.plan)} 步"
+                               if self.guide is not None else "路线待生成")
+        self._paint_progress()
+
     def _toggle_advanced(self) -> None:
         if self.advanced.winfo_manager():
             self.advanced.pack_forget()
@@ -450,9 +472,11 @@ class GuideApp:
         epoch = self.capture_epoch
         self._disable_auto_click()
         self.guide = None
+        self._update_progress()
         self.positions = {}
         self.calibrated = False
         self.face_verified = True
+        self.route_badge.set("正在抓包")
         self.auto_verified = False
         self.waiting_for_second = False
         self.calibration_attempted = False
@@ -829,6 +853,8 @@ class GuideApp:
         self.calibrate_button.configure(state="disabled")
         self.auto_click_button.configure(state="disabled")
         self.step_text.set("等待新局 · 请再次点击「开始抓包」")
+        self.route_badge.set("等待新局")
+        self._update_progress()
         self.status.set(f"{reason}；{stop_note}。下次先点击「开始抓包」，再进入新局")
 
     def _set_guide(self, board: Board, plan, cards_path: Path, progress_path: Path,
@@ -856,18 +882,25 @@ class GuideApp:
         self.pending_revive = False
         self.waiting_for_second = wait_for_second
         self.target_label = target_label
-        # A replay-valid solution only proves consistency with our reconstructed
-        # types. For daily maps those types have disagreed with the live board;
-        # geometry or a manual adjustment must never certify their faces.
+        # Backflow games need server runtime faces. Fresh games without
+        # match_data follow the client's exact seed-based assignment.
         available_ids = {board.ids[index] for index in range(board.size)
                          if self.guide.session.state.available & (1 << index)}
         observed_ids = set(cards.get("verified_visible_ids", []))
         self.face_verified = (
             target_label != "每日关卡"
-            or cards.get("verification_mode") == "server-runtime"
+            or cards.get("verification_mode") in {"server-runtime", "client-seed-fresh"}
             or (cards.get("verification_mode") == "exact-type"
                 and len(available_ids & observed_ids) >= 4)
         )
+        mode = cards.get("verification_mode")
+        if target_label == "每日关卡":
+            badge = {"server-runtime": "每日 · 服务器牌面",
+                     "client-seed-fresh": "每日 · 新局种子"}.get(mode)
+            badge = badge or ("每日 · 实测牌面" if self.face_verified else "每日 · 待核验")
+        else:
+            badge = f"{target_label} · 路线就绪"
+        self.route_badge.set(badge)
         self.calibration_file = (self.capture_dir / "guide-calibration-daily.json"
                                  if target_label == "每日关卡" else self.capture_dir / "guide-calibration.json")
         self.saved_calibration = self._read_calibration()
@@ -878,13 +911,14 @@ class GuideApp:
         self.auto_button.configure(state="disabled" if wait_for_second else "normal",
                                    text=f"⟳ 立即检查{target_label}" if wait_for_second else "⟳ 重新自动对齐")
         if not self.face_verified:
-            self.status.set("已抓到每日第二关地图，但牌面未核准。请先手动通过第一关；未核准前不会标记或点击")
+            self.status.set("已抓到每日第二关地图，但牌面来源尚未核准；未核准前不会标记或点击")
         else:
             self.status.set(f"{target_label} {board.size} 张牌路线已准备；进入{target_label}后按「我已进入{target_label}」。"
                             if wait_for_second else f"完整路线已验证：{board.size} 张。正在准备自动对齐…")
         self._update_step()
 
     def _update_step(self) -> None:
+        self._update_progress()
         if self.guide is None:
             return
         if self.waiting_for_second:
@@ -1322,6 +1356,7 @@ class GuideApp:
             elif kind == "capture_error":
                 self.capture_button.configure(text="重试抓包", state="normal")
                 self.latest_button.configure(state="normal")
+                self.route_badge.set("抓包未启动")
                 self.status.set(f"抓包未启动：{payload}")
             elif kind in ("alignment", "alignment_error"):
                 self.calibration_pending = False
@@ -1355,6 +1390,8 @@ class GuideApp:
                 self._update_step()
             elif kind == "new_game":
                 self.guide = None
+                self._update_progress()
+                self.route_badge.set("正在求解")
                 self._disable_auto_click()
                 self.positions = {}
                 self.calibrated = False

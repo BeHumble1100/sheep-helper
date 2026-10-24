@@ -194,6 +194,9 @@ def solve_prepared_game(
 ) -> tuple[Board, tuple[Action, ...]]:
     if timeout <= 0:
         raise ValueError("求解最长时间必须大于零")
+    cards = json.loads(prepared.cards_path.read_text(encoding="utf-8"))
+    if any(int(tile.get("meta_type", 0)) == 2 for tile in cards["tiles"]):
+        raise ValueError("本关含消除后会变换牌面的特殊砖块；静态路线不适用，请换一局")
     board = Board.from_files(prepared.cards_path, prepared.coverage_path)
     if prepared.solution_path.is_file():
         return board, load_verified_plan(board, prepared.solution_path)
