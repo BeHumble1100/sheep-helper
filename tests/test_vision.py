@@ -6,7 +6,10 @@ import unittest
 
 from PIL import Image, ImageDraw
 
-from sheep_helper.vision import find_alignment, find_daily_alignment, is_exposed_card, visibly_changed
+from sheep_helper.vision import (
+    find_alignment, find_daily_alignment, find_exposed_card_center,
+    is_exposed_card, visibly_changed,
+)
 from sheep_helper.solver import Board
 
 
@@ -218,3 +221,17 @@ class VisionTests(unittest.TestCase):
         draw.rectangle((75, 75, 125, 125), fill="#f1f0dc", outline="#242b35", width=3)
         self.assertTrue(is_exposed_card(image, 100, 100, 52))
         self.assertFalse(is_exposed_card(image, 45, 45, 52))
+
+    def test_daily_target_snaps_to_nearby_card_center(self) -> None:
+        image = Image.new("RGB", (220, 220), "#c5ff90")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((79, 73, 127, 121), fill="#f1f0dc", outline="#242b35", width=3)
+        draw.ellipse((91, 85, 115, 109), fill="#e56b20")
+        center = find_exposed_card_center(image, 100, 100, 52)
+        self.assertIsNotNone(center)
+        self.assertLessEqual(abs(center[0] - 103), 2)
+        self.assertLessEqual(abs(center[1] - 97), 2)
+
+    def test_daily_target_snap_rejects_grass(self) -> None:
+        image = Image.new("RGB", (220, 220), "#c5ff90")
+        self.assertIsNone(find_exposed_card_center(image, 100, 100, 52))

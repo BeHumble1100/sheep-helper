@@ -26,7 +26,10 @@ from .capture_state import CAPTURE_DONE_MARKER, CAPTURE_FORMAT_VERSION
 from .live import GuidedPlay, fetch_missing_map, find_captured_game, load_verified_plan, prepare_captured_game, solve_prepared_game
 from .solver import Board
 from .system_proxy import CaptureProxy, recover_stale_proxy
-from .vision import Alignment, find_alignment, find_daily_alignment, is_exposed_card, visibly_changed
+from .vision import (
+    Alignment, find_alignment, find_daily_alignment, find_exposed_card_center,
+    is_exposed_card, visibly_changed,
+)
 
 
 GAME_TITLE = "羊了个羊：星球"
@@ -248,6 +251,7 @@ class GuideApp:
         self.capture_epoch = 0
         self.guide: GuidedPlay | None = None
         self.positions: dict[str, tuple[int, int]] = {}
+        self._stable_alignment_ids: set[str] = set()
         self.mid_col = 0.0
         self.mid_row = 0.0
         self.calibrated = False
@@ -267,6 +271,8 @@ class GuideApp:
         self._snapshot_step = -1
         self._target_snapshot = None
         self._target_bbox: tuple[int, int, int, int] | None = None
+        self._target_adjustment = (0.0, 0.0)
+        self._target_adjustment_step = -1
         self.last_rect: tuple[int, int, int, int, int] | None = None
         self.calibration_file = capture_dir / "guide-calibration.json"
         self.saved_calibration = self._read_calibration()
@@ -531,16 +537,28 @@ class GuideApp:
                 x, y = tile_center(target[0], target[1], center_x=result.center_x,
                                    center_y=result.center_y, cell_px=result.cell_px,
                                    mid_col=mid_col, mid_row=mid_row)
-                if not is_exposed_card(frame, x, y, result.cell_px):
+                refined = find_exposed_card_center(frame, x, y, result.cell_px)
+                if refined is not None:
+                    result = Alignment(result.center_x + refined[0] - x,
+                                       result.center_y + refined[1] - y,
+                                       result.cell_px, result.confidence)
+                elif not is_exposed_card(frame, x, y, result.cell_px):
                     result = None
             self.events.put(("alignment", result, self.capture_epoch if epoch is None else epoch))
         except (OSError, ValueError) as error:
             self.events.put(("alignment_error", str(error), self.capture_epoch if epoch is None else epoch))
 
     def _available_points(self) -> list[tuple[int, int]]:
-        return [self.positions[self.guide.board.ids[index]]
-                for index in range(self.guide.board.size)
-                if self.guide.session.state.available & (1 << index)]
+        available_ids = [self.guide.board.ids[index]
+                         for index in range(self.guide.board.size)
+                         if self.guide.session.state.available & (1 << index)]
+        stable = [self.positions[tile_id] for tile_id in available_ids
+                  if tile_id in self._stable_alignment_ids]
+        if len(stable) >= 4:
+            cols, rows = zip(*stable)
+            if max(cols) - min(cols) >= 8 and max(rows) - min(rows) >= 8:
+                return stable
+        return [self.positions[tile_id] for tile_id in available_ids]
 
     def _read_calibration(self) -> dict[str, float] | None:
         try:
@@ -796,7 +814,14 @@ class GuideApp:
     def _set_guide(self, board: Board, plan, cards_path: Path, progress_path: Path,
                    wait_for_second: bool = False, target_label: str = "第二关") -> None:
         cards = json.loads(cards_path.read_text(encoding="utf-8"))
-        self.positions = {str(tile["id"]): (int(tile["col"]), int(tile["row"])) for tile in cards["tiles"]}
+        tiles = cards["tiles"]
+        self.positions = {str(tile["id"]): (int(tile["col"]), int(tile["row"])) for tile in tiles}
+        # Random-display cards can temporarily hide their face. Their map
+        # coordinates remain valid for clicking, but they are poor visual
+        # anchors for fitting the board grid.
+        self._stable_alignment_ids = {
+            str(tile["id"]) for tile in tiles if int(tile.get("mold_type", 1)) != 2
+        }
         self.mid_col = (min(col for col, _ in self.positions.values()) + max(col for col, _ in self.positions.values())) / 2
         self.mid_row = (min(row for _, row in self.positions.values()) + max(row for _, row in self.positions.values())) / 2
         self.guide = GuidedPlay(board, tuple(plan), progress_path)
@@ -911,6 +936,8 @@ class GuideApp:
         self._target_snapshot = None
         self._snapshot_step = -1
         self._pending_click_step = -1
+        self._target_adjustment = (0.0, 0.0)
+        self._target_adjustment_step = -1
         if kind == "board" and self.auto_verified and self.calibrated:
             self.root.after(250, self._capture_target_snapshot)
 
@@ -1059,7 +1086,7 @@ class GuideApp:
         self.root.after(550, lambda: self._verify_target_click(step, before, bbox))
 
     def _target_geometry(self) -> tuple[float, float, float] | None:
-        if self.guide is None or self.last_rect is None or self.guide.next_action is None:
+        if self.guide is None or self.guide.next_action is None:
             return None
         kind, value = self.guide.next_action
         if kind != "board":
@@ -1068,6 +1095,9 @@ class GuideApp:
         cell = self.cell_px.get()
         x, y = tile_center(col, row, center_x=self.center_x.get(), center_y=self.center_y.get(),
                            cell_px=cell, mid_col=self.mid_col, mid_row=self.mid_row)
+        if self._target_adjustment_step == self.guide.confirmed:
+            x += self._target_adjustment[0]
+            y += self._target_adjustment[1]
         return x, y, cell
 
     def _capture_target_snapshot(self) -> None:
@@ -1087,6 +1117,20 @@ class GuideApp:
             self._disable_auto_click()
             self.status.set("目标位置超出游戏区域，自动点击已停；请重新对齐")
             return
+        search_half = max(radius + 3, round(cell * 0.68))
+        search_bbox = (round(left + x) - search_half, round(top + y) - search_half,
+                       round(left + x) + search_half, round(top + y) + search_half)
+        try:
+            search_image = ImageGrab.grab(bbox=search_bbox, all_screens=True)
+            refined = find_exposed_card_center(search_image, search_half, search_half, cell)
+        except OSError:
+            refined = None
+        if refined is not None:
+            adjustment = (refined[0] - search_half, refined[1] - search_half)
+            self._target_adjustment = adjustment
+            self._target_adjustment_step = self.guide.confirmed
+            x += adjustment[0]
+            y += adjustment[1]
         screen_x, screen_y = round(left + x), round(top + y)
         bbox = (screen_x - radius, screen_y - radius,
                 screen_x + radius, screen_y + radius)
@@ -1185,9 +1229,10 @@ class GuideApp:
             return
         kind, value = action
         if kind == "board":
-            col, row = self.positions[self.guide.board.ids[value]]
-            x, y = tile_center(col, row, center_x=center_x, center_y=center_y,
-                               cell_px=cell, mid_col=self.mid_col, mid_row=self.mid_row)
+            geometry = self._target_geometry()
+            if geometry is None:
+                return
+            x, y, cell = geometry
             radius = cell * 0.40
             arm = max(6, cell * 0.13)
             focus_color = ACCENT if self.calibrated else "#ffbd69"

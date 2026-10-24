@@ -212,6 +212,63 @@ def is_exposed_card(image: Image.Image, x: float, y: float, cell: float) -> bool
     return edges[cx, cy - border] >= 35 and edges[cx, cy + border] >= 35
 
 
+def find_exposed_card_center(
+    image: Image.Image, x: float, y: float, cell: float,
+) -> tuple[float, float] | None:
+    """Snap a nearly aligned target to its visible card border.
+
+    The search stays well inside half a grid pitch, so a nearby staggered or
+    adjacent card cannot replace the planned tile.  This corrects the small
+    per-frame offset left by global daily-board registration without changing
+    the route or its map coordinates.
+    """
+    width, height = image.size
+    if cell < 8 or width < cell or height < cell:
+        return None
+    border = round(cell * 0.45)
+    corner = round(cell * 0.30)
+    limit = max(2, round(cell * 0.18))
+    colors = image.convert("RGB").load()
+    edges = image.convert("L").filter(ImageFilter.FIND_EDGES).filter(ImageFilter.MaxFilter(5)).load()
+
+    def pale(px: int, py: int) -> bool:
+        red, _green, blue = colors[px, py]
+        return red >= 210 and blue >= 160
+
+    candidates: list[tuple[int, int, int]] = []
+    origin_x, origin_y = round(x), round(y)
+    edge_offsets = (-round(cell * 0.20), 0, round(cell * 0.20))
+    for cy in range(origin_y - limit, origin_y + limit + 1):
+        for cx in range(origin_x - limit, origin_x + limit + 1):
+            if (cx - border < 2 or cy - border < 2
+                    or cx + border >= width - 2 or cy + border >= height - 2):
+                continue
+            pale_corners = sum(
+                pale(cx + dx, cy + dy)
+                for dx in (-corner, corner) for dy in (-corner, corner)
+            )
+            if pale_corners < 3:
+                continue
+            strength = 0
+            for offset in edge_offsets:
+                strength += edges[cx + offset, cy - border] + edges[cx + offset, cy + border]
+                strength += edges[cx - border, cy + offset] + edges[cx + border, cy + offset]
+            candidates.append((strength, cx, cy))
+    if not candidates:
+        return None
+    strongest = max(item[0] for item in candidates)
+    if strongest < 420:
+        return None
+    # FIND_EDGES followed by MaxFilter deliberately thickens the border, so
+    # several neighboring centers can tie. Their median is the geometric
+    # center; choosing the first or the point nearest the original estimate
+    # would retain a systematic offset.
+    plateau = [item for item in candidates if item[0] >= strongest * 0.98]
+    cx = round(median(item[1] for item in plateau))
+    cy = round(median(item[2] for item in plateau))
+    return (float(cx), float(cy)) if is_exposed_card(image, cx, cy, cell) else None
+
+
 def visibly_changed(before: Image.Image, after: Image.Image, minimum: float = 12.0) -> bool:
     if before.size != after.size:
         return False
