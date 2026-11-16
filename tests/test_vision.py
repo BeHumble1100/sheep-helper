@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw
 
 from sheep_helper.vision import (
     find_alignment, find_daily_alignment, find_exposed_card_center,
-    is_exposed_card, visibly_changed,
+    is_exposed_card, visibly_changed, find_parked_cards,
 )
 from sheep_helper.solver import Board
 
@@ -17,6 +17,48 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class VisionTests(unittest.TestCase):
+    def test_parked_cards_keep_columns_and_choose_top_of_stack(self) -> None:
+        for occupied in ((True, True, True), (False, True, True), (True, False, True)):
+            with self.subTest(occupied=occupied):
+                image = Image.new("RGB", (400, 700), "#c5ff90")
+                draw = ImageDraw.Draw(image)
+                draw.rectangle((12, 560, 388, 638), fill="#55aa20")
+                for slot, present in enumerate(occupied):
+                    if present:
+                        x = 160 + slot * 40
+                        # Two moves stack upward by 8/120 of the board pitch.
+                        draw.rectangle((x - 18, 492, x + 18, 532), fill="#f5efd9")
+                        draw.ellipse((x - 7, 501, x + 7, 515), fill="#703a20")
+                # Full-size tray cards must not become move-out targets.
+                for x in (90, 140, 190, 240, 290):
+                    draw.rectangle((x - 23, 570, x + 23, 616), fill="#f5efd9")
+                found = find_parked_cards(image, 50, occupied)
+                self.assertEqual(set(found), {i for i, present in enumerate(occupied) if present})
+                for slot, (x, y, _) in found.items():
+                    self.assertAlmostEqual(x, 160 + slot * 40, delta=2)
+                    self.assertAlmostEqual(y, 510, delta=2)
+
+    def test_parked_cards_reject_missing_and_ambiguous_rows(self) -> None:
+        image = Image.new("RGB", (400, 700), "#c5ff90")
+        self.assertEqual(find_parked_cards(image, 50, (True, True, True)), {})
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((12, 560, 388, 638), fill="#55aa20")
+        for y in (485, 535):
+            for x in (160, 200, 240):
+                draw.rectangle((x - 18, y - 18, x + 18, y + 18), fill="#f5efd9")
+        self.assertEqual(find_parked_cards(image, 50, (True, True, True)), {})
+
+    def test_real_move_out_cards_have_independent_scale_from_board(self) -> None:
+        image = Image.open(ROOT / "tests/fixtures/parked-real.png")
+        for scale in (0.75, 1.0, 1.25):
+            with self.subTest(scale=scale):
+                frame = image.resize((round(image.width * scale), round(image.height * scale)))
+                found = find_parked_cards(frame, 56 * scale, (True, True, True))
+                self.assertEqual(set(found), {0, 1, 2})
+                for slot, (x, y, _) in found.items():
+                    self.assertAlmostEqual(x, (212 + 60 * slot) * scale, delta=3)
+                    self.assertAlmostEqual(y, (747 if slot < 2 else 751) * scale, delta=3)
+
     def test_alignment_finds_visible_card_grid(self) -> None:
         image = Image.new("RGB", (400, 700), "#454c5b")
         draw = ImageDraw.Draw(image)

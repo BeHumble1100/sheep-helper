@@ -18,6 +18,7 @@ import winreg
 
 INTERNET_SETTINGS = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
 UPSTREAM_PROXY = "127.0.0.1:7890"
+SUPPORTED_UPSTREAMS = (UPSTREAM_PROXY, "127.0.0.1:7897")
 CAPTURE_PROXY = "127.0.0.1:18888"
 STATE_NAME = ".system-proxy-restore.json"
 
@@ -63,9 +64,9 @@ def _record(path: Path) -> dict[str, object]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if (not isinstance(data, dict) or type(data.get("owner_pid")) is not int
             or data.get("capture_proxy") != CAPTURE_PROXY
-            or data.get("upstream_proxy") != UPSTREAM_PROXY
+            or data.get("upstream_proxy") not in SUPPORTED_UPSTREAMS
             or data.get("original_enabled") != 1
-            or data.get("original_server") != UPSTREAM_PROXY):
+            or data.get("original_server") != data.get("upstream_proxy")):
         raise ValueError("系统代理恢复记录无效；未改动现有代理")
     return data
 
@@ -110,6 +111,18 @@ def watch_owner(path: Path, owner_pid: int) -> None:
         pass  # Keep the recovery record for the next GUI launch.
 
 
+def start_proxy_watchdog(path: Path, owner_pid: int) -> subprocess.Popen:
+    command = ([sys.executable] if getattr(sys, "frozen", False)
+               else [sys.executable, "-m", "sheep_helper.desktop"])
+    command.extend(("--proxy-watchdog", str(path), "--owner-pid", str(owner_pid)))
+    environment = os.environ.copy()
+    if getattr(sys, "frozen", False):
+        # An independent watcher must not lock its owner's one-file resources.
+        environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return subprocess.Popen(command, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment)
+
+
 class CaptureProxy:
     def __init__(self, capture_dir: Path) -> None:
         self.path = capture_dir / STATE_NAME
@@ -122,21 +135,17 @@ class CaptureProxy:
         if self.path.exists():
             raise RuntimeError("另一助手仍持有临时代理；请先关闭旧助手")
         original_enabled, original_server = _read_proxy()
-        if (original_enabled, original_server) != (1, UPSTREAM_PROXY):
-            raise RuntimeError("系统代理不是已配置的 Clash 127.0.0.1:7890；未自动改动")
+        if original_enabled != 1 or original_server not in SUPPORTED_UPSTREAMS:
+            raise RuntimeError("系统代理须为 Clash 127.0.0.1:7890 或 127.0.0.1:7897；未自动改动")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         record = {"owner_pid": self.owner_pid, "original_enabled": original_enabled,
                   "original_server": original_server, "capture_proxy": CAPTURE_PROXY,
-                  "upstream_proxy": UPSTREAM_PROXY}
+                  "upstream_proxy": original_server}
         temporary = self.path.with_name(f"{STATE_NAME}.{self.owner_pid}.tmp")
         temporary.write_text(json.dumps(record), encoding="utf-8")
         temporary.replace(self.path)
-        command = ([sys.executable] if getattr(sys, "frozen", False)
-                   else [sys.executable, "-m", "sheep_helper.desktop"])
-        command.extend(("--proxy-watchdog", str(self.path), "--owner-pid", str(self.owner_pid)))
         try:
-            subprocess.Popen(command, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            start_proxy_watchdog(self.path, self.owner_pid)
             _write_proxy(1, CAPTURE_PROXY)
         except (OSError, ValueError):
             restore_proxy(self.path, owner_pid=self.owner_pid)

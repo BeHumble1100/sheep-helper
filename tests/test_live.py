@@ -593,6 +593,46 @@ class LiveGuideTests(unittest.TestCase):
                 app.close()
 
     @unittest.skipUnless(sys.platform == "win32", "Windows guide only")
+    def test_background_click_works_without_foreground_or_real_mouse(self) -> None:
+        board = Board.from_files(CARDS, COVERAGE)
+        plan = load_verified_plan(board, SOLUTION)
+        with tempfile.TemporaryDirectory() as directory:
+            app = GuideApp(capture_dir=Path(directory), start_capture=False)
+            try:
+                app._set_guide(board, plan, CARDS, Path(directory) / "progress.json")
+                app.last_rect = (1, 0, 0, 565, 1006)
+                app.center_x.set(282)
+                app.center_y.set(435)
+                app.cell_px.set(52)
+                app.calibrated = app.auto_verified = True
+                app.background_click.set(True)
+                app._target_snapshot = Image.new("L", (20, 20), "white")
+                app._target_bbox = (0, 0, 20, 20)
+                app._snapshot_step = 0
+                app._toggle_auto_click()
+                app.last_auto_click = time.monotonic() - 2
+                user32 = Mock()
+                user32.GetForegroundWindow.return_value = 99
+                user32.GetAsyncKeyState.return_value = 0x8000
+                with patch("sheep_helper.guide_ui.post_click") as send:
+                    app._maybe_auto_click(user32, 1, 0, 0, 565, 1006)
+                    app._maybe_auto_click(user32, 1, 0, 0, 565, 1006)
+                send.assert_called_once()
+                self.assertEqual(send.call_args.args[0], 1)
+                user32.SetCursorPos.assert_not_called()
+                user32.mouse_event.assert_not_called()
+                with patch.object(app, "_grab_game_region", return_value=Image.new("L", (20, 20), "black")):
+                    app._verify_target_click(0, app._target_snapshot, app._target_bbox)
+                self.assertEqual(app.guide.confirmed, 1)
+                self.assertTrue(app.auto_click_enabled)
+                with patch.object(app, "_grab_game_region", side_effect=OSError("renderer stopped")):
+                    app._verify_target_click(1, Image.new("L", (20, 20)), (0, 0, 20, 20))
+                self.assertEqual(app.guide.confirmed, 1)
+                self.assertFalse(app.auto_click_enabled)
+            finally:
+                app.close()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows guide only")
     def test_auto_click_only_sends_one_board_click_after_opt_in(self) -> None:
         board = Board.from_files(CARDS, COVERAGE)
         plan = load_verified_plan(board, SOLUTION)
@@ -631,6 +671,52 @@ class LiveGuideTests(unittest.TestCase):
                 app._pending_click_step = -1
                 app._maybe_auto_click(user32, 1, 0, 0, 565, 1006)
                 self.assertEqual(user32.mouse_event.call_count, 2)
+            finally:
+                app.close()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows guide only")
+    def test_parked_card_can_be_located_clicked_and_confirmed(self) -> None:
+        folder = ROOT / "captured-layouts" / "session-1792609938426" / "verified"
+        cards = next(folder.glob("*.cards.json"))
+        board = Board.from_files(cards, next(folder.glob("*.coverage.json")))
+        plan = load_verified_plan(board, next(folder.glob("*.guide-solution.json")))
+        with tempfile.TemporaryDirectory() as directory:
+            app = GuideApp(capture_dir=Path(directory), start_capture=False)
+            try:
+                app._set_guide(board, plan, cards, Path(directory) / "progress.json")
+                for _ in range(174):
+                    app.guide._advance(save=False)
+                self.assertEqual(app.guide.next_action[0], "park")
+                slot = app.guide.next_action[1]
+                app.last_rect = (1, 0, 0, 565, 1006)
+                app.cell_px.set(52)
+                app.calibrated = app.auto_verified = True
+                app._update_step()
+                # Failed localization must never fall back to a board tile.
+                with patch("sheep_helper.guide_ui.ImageGrab.grab", return_value=Image.new("RGB", (565, 1006))), patch(
+                        "sheep_helper.guide_ui.find_parked_cards", return_value={}):
+                    app._capture_target_snapshot()
+                self.assertIsNone(app._target_geometry())
+                self.assertFalse(app.auto_click_enabled)
+                with patch("sheep_helper.guide_ui.ImageGrab.grab", return_value=Image.new("RGB", (565, 1006))), patch(
+                        "sheep_helper.guide_ui.find_parked_cards", return_value={slot: (230, 730, 42)}):
+                    app._capture_target_snapshot()
+                self.assertEqual(app._target_geometry(), (230, 730, 42))
+                app._toggle_auto_click()
+                app.last_auto_click = time.monotonic() - 2
+                user32 = Mock()
+                user32.GetForegroundWindow.return_value = 1
+                user32.GetAsyncKeyState.return_value = 0
+                user32.SetCursorPos.return_value = True
+                app._maybe_auto_click(user32, 1, 0, 0, 565, 1006)
+                user32.SetCursorPos.assert_called_once_with(230, 730)
+                self.assertEqual(user32.mouse_event.call_count, 2)
+                with patch("sheep_helper.guide_ui.ImageGrab.grab", return_value=Image.new("L", (20, 20))), patch(
+                        "sheep_helper.guide_ui.visibly_changed", return_value=True), patch(
+                        "sheep_helper.guide_ui.ctypes.windll.user32.GetForegroundWindow", return_value=1):
+                    app._verify_target_click(174, app._target_snapshot, app._target_bbox)
+                self.assertEqual(app.guide.confirmed, 175)
+                self.assertTrue(app.auto_click_enabled)
             finally:
                 app.close()
 

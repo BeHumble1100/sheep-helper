@@ -22,13 +22,15 @@ from tkinter import messagebox
 from PIL import ImageGrab
 
 from .card_faces import board_region, face_name
+from .background import BackgroundFrames, post_click
 from .capture_state import CAPTURE_DONE_MARKER
+from .capture_runtime import prepare_capture_runtime
 from .live import GuidedPlay, fetch_missing_map, find_captured_game, load_verified_plan, prepare_captured_game, solve_prepared_game
-from .solver import Board
-from .system_proxy import CaptureProxy, recover_stale_proxy
+from .solver import Board, replay, DEFAULT_SOLVE_TIMEOUT
+from .system_proxy import CaptureProxy, recover_stale_proxy, _read_proxy, SUPPORTED_UPSTREAMS
 from .vision import (
     Alignment, find_alignment, find_daily_alignment, find_exposed_card_center,
-    is_exposed_card, visibly_changed,
+    is_exposed_card, visibly_changed, find_parked_cards,
 )
 
 
@@ -42,7 +44,6 @@ PANEL = "#15243a"
 MUTED = "#91a5bf"
 TEXT = "#edf5ff"
 ACCENT = "#55e5bd"
-DEFAULT_SOLVE_TIMEOUT = 20.0
 
 
 def tile_center(
@@ -168,6 +169,16 @@ def _owned_capture_pid(capture_dir: Path, port: int) -> int | None:
     return None
 
 
+def _find_mitmdump() -> str | None:
+    found = shutil.which("mitmdump")
+    if found:
+        return found
+    project_root = (Path(sys.executable).resolve().parent.parent
+                    if getattr(sys, "frozen", False)
+                    else Path(__file__).resolve().parents[2])
+    return shutil.which("mitmdump", path=str(project_root / ".venv" / "Scripts"))
+
+
 def _start_capture(capture_dir: Path, *, port: int = CAPTURE_PORT) -> subprocess.Popen[bytes] | None:
     if _port_running(port):
         owned_pid = _owned_capture_pid(capture_dir, port)
@@ -187,26 +198,32 @@ def _start_capture(capture_dir: Path, *, port: int = CAPTURE_PORT) -> subprocess
             if time.monotonic() >= deadline:
                 raise RuntimeError("旧抓包监听器仍占用端口；请关闭旧版后重试")
             time.sleep(0.1)
-    mitmdump = shutil.which("mitmdump")
+    mitmdump = _find_mitmdump()
     if mitmdump is None:
         raise RuntimeError("找不到 mitmdump；请先安装 mitmproxy，并确保其 Scripts 目录在 PATH 中")
     confdir = _capture_confdir()
     if not (confdir / "mitmproxy-ca.pem").is_file():
         raise RuntimeError(f"找不到已配置的 mitmproxy 证书目录：{confdir}")
+    enabled, server = _read_proxy()
+    upstream_port = int(server.rsplit(":", 1)[1]) if enabled and server in SUPPORTED_UPSTREAMS else UPSTREAM_PORT
     upstream_deadline = time.monotonic() + 15.0
-    while not _port_running(UPSTREAM_PORT):
+    while not _port_running(upstream_port):
         if time.monotonic() >= upstream_deadline:
-            raise RuntimeError("Clash 上游代理 127.0.0.1:7890 未就绪；启动 Clash 后重新打开助手")
+            raise RuntimeError(f"Clash 上游代理 {UPSTREAM_HOST}:{upstream_port} 未就绪；启动 Clash 后重新打开助手")
         time.sleep(0.25)
-    capture_addon = Path(__file__).with_name("game_capture_addon.py").resolve()
-    seed_addon = Path(__file__).with_name("seed_recovery_addon.py").resolve()
+    addon_dir = Path(__file__).resolve().parent
+    bundle_dir = Path(sys._MEIPASS).resolve() if getattr(sys, "frozen", False) else None
+    if bundle_dir is not None:
+        addon_dir = prepare_capture_runtime(addon_dir, capture_dir / ".capture-runtime")
+    capture_addon = addon_dir / "game_capture_addon.py"
+    seed_addon = addon_dir / "seed_recovery_addon.py"
     if not capture_addon.is_file() or not seed_addon.is_file():
         raise RuntimeError("抓包插件源码缺失；请重新构建 EXE")
 
     capture_dir.mkdir(parents=True, exist_ok=True)
     command = [
         mitmdump, "--set", f"confdir={confdir}",
-        "--mode", f"upstream:http://{UPSTREAM_HOST}:{UPSTREAM_PORT}",
+        "--mode", f"upstream:http://{UPSTREAM_HOST}:{upstream_port}",
         "--listen-host", "127.0.0.1", "--listen-port", str(port),
         "-s", capture_addon,
         "--set", f"game_capture_dir={capture_dir.resolve()}", "-s", seed_addon,
@@ -214,9 +231,12 @@ def _start_capture(capture_dir: Path, *, port: int = CAPTURE_PORT) -> subprocess
     ]
     environment = os.environ.copy()
     addon_parent = str(capture_addon.parent.parent)
-    environment["PYTHONPATH"] = os.pathsep.join(filter(None, (addon_parent, environment.get("PYTHONPATH"))))
+    python_paths = environment.get("PYTHONPATH", "").split(os.pathsep)
+    if bundle_dir is not None:
+        python_paths = [entry for entry in python_paths
+                        if entry and not Path(entry).resolve().is_relative_to(bundle_dir)]
+    environment["PYTHONPATH"] = os.pathsep.join(filter(None, (addon_parent, *python_paths)))
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    bundle_dir = Path(sys._MEIPASS).resolve() if getattr(sys, "frozen", False) else None
     if bundle_dir is not None:
         environment["PATH"] = os.pathsep.join(
             entry for entry in environment.get("PATH", "").split(os.pathsep)
@@ -230,7 +250,7 @@ def _start_capture(capture_dir: Path, *, port: int = CAPTURE_PORT) -> subprocess
     finally:
         if bundle_dir is not None:
             ctypes.windll.kernel32.SetDllDirectoryW(str(bundle_dir))
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
         if _port_running(port):
             return process
@@ -238,7 +258,7 @@ def _start_capture(capture_dir: Path, *, port: int = CAPTURE_PORT) -> subprocess
             raise RuntimeError(f"mitmdump 启动失败，退出码 {process.returncode}")
         time.sleep(0.1)
     process.terminate()
-    raise RuntimeError(f"mitmdump 未在 5 秒内开始监听本机 {port} 端口")
+    raise RuntimeError(f"mitmdump 未在 20 秒内开始监听本机 {port} 端口")
 
 
 class GuideApp:
@@ -313,6 +333,8 @@ class GuideApp:
         self.center_x = tk.DoubleVar(value=180)
         self.center_y = tk.DoubleVar(value=250)
         self.cell_px = tk.DoubleVar(value=42)
+        self.background_click = tk.BooleanVar(value=False)
+        self.background_frames: BackgroundFrames | None = None
         self._build_controls()
 
         self.overlay = tk.Toplevel(self.root)
@@ -412,6 +434,10 @@ class GuideApp:
                                          bg=BG, fg=MUTED, relief="flat", bd=0,
                                          activebackground=BG, activeforeground=TEXT)
         self.advanced_button.pack(side="right")
+        tk.Checkbutton(self.root, text="后台模拟点击（不占鼠标，窗口请勿最小化）",
+                       variable=self.background_click, command=self._toggle_background_click,
+                       bg=BG, fg=TEXT, selectcolor=PANEL, activebackground=BG,
+                       activeforeground=TEXT).pack(anchor="w", padx=20, pady=(8, 0))
 
         self.advanced = tk.Frame(self.root, bg=PANEL, padx=12, pady=10)
         row = tk.Frame(self.advanced, bg=PANEL)
@@ -424,7 +450,7 @@ class GuideApp:
         self.calibrate_button = tk.Button(self.advanced, text="应用微调位置", command=self._toggle_calibration,
                                           bg="#314867", fg=TEXT, relief="flat", bd=0, padx=12, pady=6)
         self.calibrate_button.pack(anchor="w", pady=(8, 0))
-        tk.Label(self.root, text="自动点击默认关闭；道具、移出区与复活步骤都要手动完成并确认。",
+        tk.Label(self.root, text="自动点击默认关闭；支持取回移出牌，道具与复活需手动完成并确认。",
                  wraplength=430, justify="left", font=("Microsoft YaHei UI", 9),
                  fg=MUTED, bg=BG).pack(anchor="w", padx=20, pady=(18, 4))
         tk.Label(self.root, text="若点错、换局或标记不准，请立即暂停。",
@@ -913,8 +939,11 @@ class GuideApp:
         if not self.face_verified:
             self.status.set("已抓到每日第二关地图，但牌面来源尚未核准；未核准前不会标记或点击")
         else:
-            self.status.set(f"{target_label} {board.size} 张牌路线已准备；进入{target_label}后按「我已进入{target_label}」。"
-                            if wait_for_second else f"完整路线已验证：{board.size} 张。正在准备自动对齐…")
+            final = replay(board, plan)
+            tools = ("移出和复活" if final.move_out_used and final.revive_used else
+                     "仅移出" if final.move_out_used else "仅复活" if final.revive_used else "无道具")
+            self.status.set(f"{target_label} {board.size} 张牌 · {tools}路线已准备；进入后按「我已进入{target_label}」。"
+                            if wait_for_second else f"完整路线已验证：{board.size} 张 · {tools}。正在准备自动对齐…")
         self._update_step()
 
     def _update_step(self) -> None:
@@ -973,8 +1002,9 @@ class GuideApp:
             self.confirm_button.configure(text="我已点此牌", state="normal" if self.calibrated and not self.paused else "disabled")
             self.special_button.configure(state="disabled", text="道具或复活完成后在这里确认")
         elif kind == "park":
-            self.step_text.set(f"第 {self.guide.confirmed + 1} 步：点击移出区第 {value + 1} 列最上方的牌，完成后确认")
-            self.confirm_button.configure(text="等待取回", state="disabled")
+            card = self.guide.session.state.parked[value][-1]
+            self.step_text.set(f"第 {self.guide.confirmed + 1} 步：取回移出区第 {value + 1} 列的{face_name(self.guide.board.types[card])}")
+            self.confirm_button.configure(text="我已取回此牌", state="normal" if self.calibrated and not self.paused else "disabled")
             self.special_button.configure(text="确认已取回此牌", state="normal" if self.calibrated and not self.paused else "disabled")
         else:
             self.step_text.set(f"第 {self.guide.confirmed + 1} 步：使用一次“移出三张”道具，完成后确认")
@@ -982,7 +1012,7 @@ class GuideApp:
             self.special_button.configure(text="确认已使用移出道具", state="normal" if self.calibrated and not self.paused else "disabled")
         self.auto_click_button.configure(state="normal" if self.calibrated and self.auto_verified
                                          and not self.paused else "disabled")
-        if kind != "board" and self.auto_click_enabled:
+        if kind not in ("board", "park") and self.auto_click_enabled:
             self.auto_click_button.configure(text="自动点击：待确认")
             self.status.set("自动点击已等待：请先在游戏中完成本步，再按面板确认")
         elif self.auto_click_enabled:
@@ -990,9 +1020,10 @@ class GuideApp:
         self._target_snapshot = None
         self._snapshot_step = -1
         self._pending_click_step = -1
+        self._park_geometry_step = -1
         self._target_adjustment = (0.0, 0.0)
         self._target_adjustment_step = -1
-        if kind == "board" and self.auto_verified and self.calibrated:
+        if kind in ("board", "park") and self.auto_verified and self.calibrated:
             self.root.after(250, self._capture_target_snapshot)
 
     def _toggle_calibration(self) -> None:
@@ -1029,7 +1060,7 @@ class GuideApp:
             return
         if self.guide is None or not self.calibrated:
             return
-        if self.pending_revive or self.guide.next_action is None or self.guide.next_action[0] != "board":
+        if self.pending_revive or self.guide.next_action is None or self.guide.next_action[0] not in ("board", "park"):
             self.status.set("这一步需先完成道具或复活，再按下方专用确认键")
             return
         if not visual_confirmed:
@@ -1095,22 +1126,48 @@ class GuideApp:
         self.auto_click_enabled = True
         self.last_auto_click = time.monotonic()
         self.auto_click_button.configure(text="自动点击：开", fg=ACCENT)
-        self.status.set("自动点击已开启；只点普通牌，道具和复活等你手动完成并确认")
+        self.status.set("自动点击已开启；支持普通牌和移出牌，道具及复活请手动完成并确认")
+
+    def _toggle_background_click(self) -> None:
+        self._disable_auto_click()
+        self._background_wait = None
+        if self.background_frames is not None:
+            self.background_frames.close()
+            self.background_frames = None
+        self._update_step()
+        self.status.set("后台模拟点击已开启；核对准心后开启自动点击，可切换其他窗口，请勿最小化游戏"
+                        if self.background_click.get() else "已恢复前台鼠标点击；请重新开启自动点击")
+
+    def _grab_game_region(self, bbox):
+        if not self.background_click.get():
+            return ImageGrab.grab(bbox=bbox, all_screens=True)
+        if self.last_rect is None:
+            raise OSError("游戏窗口不可用")
+        hwnd, left, top, width, height = self.last_rect
+        if self.background_frames is None:
+            self.background_frames = BackgroundFrames()
+        target = (hwnd, width, height)
+        self.background_frames.request(target)
+        frame = self.background_frames.frame(target)
+        x1, y1, x2, y2 = bbox
+        if not (left <= x1 < x2 <= left + width and top <= y1 < y2 <= top + height):
+            raise OSError("截图范围超出游戏窗口")
+        return frame.crop((x1 - left, y1 - top, x2 - left, y2 - top))
 
     def _maybe_auto_click(self, user32, hwnd: int, left: int, top: int,
                           width: int, height: int) -> None:
         if (not self.auto_click_enabled or self.guide is None or not self.auto_verified
                 or not self.calibrated or self.paused or self.pending_revive
                 or self.calibration_pending or self.waiting_for_second
-                or self.guide.next_action is None or self.guide.next_action[0] != "board"
+                or self.guide.next_action is None or self.guide.next_action[0] not in ("board", "park")
                 or time.monotonic() - self.last_auto_click < 1.0):
             return
         step = self.guide.confirmed
         if (self.auto_click_pending_step == step or self._pending_click_step == step
                 or self._snapshot_step != step or self._target_snapshot is None
                 or self._target_bbox is None
-                or user32.GetForegroundWindow() != hwnd
-                or user32.GetAsyncKeyState(0x01) & 0x8000):
+                or (not self.background_click.get() and
+                    (user32.GetForegroundWindow() != hwnd or user32.GetAsyncKeyState(0x01) & 0x8000))):
             return
         geometry = self._target_geometry()
         if geometry is None:
@@ -1127,10 +1184,13 @@ class GuideApp:
         self.last_auto_click = time.monotonic()
         self.confirm_button.configure(state="disabled")
         try:
-            if not user32.SetCursorPos(round(left + x), round(top + y)):
-                raise OSError("无法定位鼠标")
-            user32.mouse_event(0x0002, 0, 0, 0, 0)  # left button down
-            user32.mouse_event(0x0004, 0, 0, 0, 0)  # left button up
+            if self.background_click.get():
+                post_click(hwnd, round(x), round(y))
+            else:
+                if not user32.SetCursorPos(round(left + x), round(top + y)):
+                    raise OSError("无法定位鼠标")
+                user32.mouse_event(0x0002, 0, 0, 0, 0)
+                user32.mouse_event(0x0004, 0, 0, 0, 0)
         except (OSError, AttributeError) as error:
             self._disable_auto_click()
             self._pending_click_step = -1
@@ -1143,6 +1203,9 @@ class GuideApp:
         if self.guide is None or self.guide.next_action is None:
             return None
         kind, value = self.guide.next_action
+        if kind == "park":
+            return (getattr(self, "_park_geometry", None)
+                    if getattr(self, "_park_geometry_step", -1) == self.guide.confirmed else None)
         if kind != "board":
             return None
         col, row = self.positions[self.guide.board.ids[value]]
@@ -1157,6 +1220,39 @@ class GuideApp:
     def _capture_target_snapshot(self) -> None:
         if not self.auto_verified or not self.calibrated or self.paused or self.pending_revive:
             return
+        if self.guide is None or self.last_rect is None:
+            return
+        if self.background_click.get():
+            hwnd, left, top, width, height = self.last_rect
+            key = (self.capture_epoch, self.guide.confirmed, hwnd, width, height)
+            try:
+                self._grab_game_region((left, top, left + width, top + height))
+                self._background_wait = None
+            except OSError as error:
+                waiting = getattr(self, "_background_wait", None)
+                if waiting is None or waiting[0] != key:
+                    waiting = self._background_wait = (key, time.monotonic())
+                if time.monotonic() - waiting[1] < 3:
+                    self.root.after(150, self._capture_target_snapshot)
+                else:
+                    self._disable_auto_click()
+                    self.status.set(f"后台画面不可用，已停止模拟点击：{error}")
+                return
+        if self.guide.next_action is not None and self.guide.next_action[0] == "park":
+            self._park_geometry_step = -1
+            _hwnd, left, top, width, height = self.last_rect
+            try:
+                frame = self._grab_game_region((left, top, left + width, top + height))
+                found = find_parked_cards(frame, self.cell_px.get(),
+                                          tuple(bool(slot) for slot in self.guide.session.state.parked))
+            except OSError:
+                found = {}
+            self._park_geometry = found.get(self.guide.next_action[1])
+            if self._park_geometry is None:
+                self._disable_auto_click()
+                self.status.set("未能唯一定位移出区牌；请保持游戏可见，重新对齐或手动取回并确认")
+                return
+            self._park_geometry_step = self.guide.confirmed
         geometry = self._target_geometry()
         if geometry is None:
             return
@@ -1175,7 +1271,7 @@ class GuideApp:
         search_bbox = (round(left + x) - search_half, round(top + y) - search_half,
                        round(left + x) + search_half, round(top + y) + search_half)
         try:
-            search_image = ImageGrab.grab(bbox=search_bbox, all_screens=True)
+            search_image = self._grab_game_region(search_bbox)
             refined = find_exposed_card_center(search_image, search_half, search_half, cell)
         except OSError:
             refined = None
@@ -1185,11 +1281,13 @@ class GuideApp:
             self._target_adjustment_step = self.guide.confirmed
             x += adjustment[0]
             y += adjustment[1]
+            if self.guide.next_action[0] == "park":
+                self._park_geometry = (x, y, cell)
         screen_x, screen_y = round(left + x), round(top + y)
         bbox = (screen_x - radius, screen_y - radius,
                 screen_x + radius, screen_y + radius)
         try:
-            snapshot = ImageGrab.grab(bbox=bbox, all_screens=True).convert("L")
+            snapshot = self._grab_game_region(bbox).convert("L")
         except OSError:
             self._target_snapshot = None
             self._target_bbox = None
@@ -1242,9 +1340,10 @@ class GuideApp:
                 or not self.auto_verified or bbox is None):
             return
         try:
-            after = ImageGrab.grab(bbox=bbox, all_screens=True).convert("L")
+            after = self._grab_game_region(bbox).convert("L")
             changed = (self.last_rect is not None
-                       and ctypes.windll.user32.GetForegroundWindow() == self.last_rect[0]
+                       and (self.background_click.get() or
+                            ctypes.windll.user32.GetForegroundWindow() == self.last_rect[0])
                        and visibly_changed(before, after))
         except OSError:
             changed = False
@@ -1282,7 +1381,7 @@ class GuideApp:
                                     fill="white", font=("Segoe UI", 12, "bold"))
             return
         kind, value = action
-        if kind == "board":
+        if kind in ("board", "park"):
             geometry = self._target_geometry()
             if geometry is None:
                 return
@@ -1467,13 +1566,15 @@ class GuideApp:
                     click_through = False
                 if click_through:
                     self._draw_overlay(width, height)
-                    if foreground == hwnd:
+                    if foreground == hwnd and not self.background_click.get():
                         self._maybe_auto_click(user32, hwnd, x, y, width, height)
                 else:
                     self.overlay.withdraw()
                     self.status.set("标记层无法点击穿透，已隐藏；游戏仍可正常点击")
             else:
                 self.overlay.withdraw()
+            if self.background_click.get():
+                self._maybe_auto_click(user32, hwnd, x, y, width, height)
         if (self.guide is not None and self.last_rect is not None and not self.paused
                 and not self.waiting_for_second):
             if not self.calibration_attempted and not self.calibration_pending:
@@ -1483,6 +1584,8 @@ class GuideApp:
 
     def close(self) -> None:
         self.closed.set()
+        if self.background_frames is not None:
+            self.background_frames.close()
         try:
             self.capture_dir.mkdir(parents=True, exist_ok=True)
             (self.capture_dir / CAPTURE_DONE_MARKER).touch()
@@ -1491,7 +1594,7 @@ class GuideApp:
         try:
             self.capture_proxy.restore()
         except (OSError, ValueError) as error:
-            messagebox.showerror("系统代理恢复失败", f"请手动将 Windows 代理恢复为 127.0.0.1:7890：{error}")
+            messagebox.showerror("系统代理恢复失败", f"请手动将 Windows 代理恢复为抓包前的 Clash 地址（7890 或 7897 端口）：{error}")
         self.overlay.destroy()
         self.root.destroy()
 

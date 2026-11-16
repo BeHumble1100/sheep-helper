@@ -19,7 +19,7 @@ from .map_format import decode_map
 from .capture_state import safe_game_route, valid_map_ids
 from .pipeline import validate_seed_record, write_session
 from .session import ManualPlaySession
-from .solver import Action, Board, DFSConfig, SolveResult, replay, result_to_dict, solve_hybrid
+from .solver import Action, Board, DFSConfig, SolveResult, replay, result_to_dict, solve_hybrid, DEFAULT_SOLVE_TIMEOUT
 
 
 @dataclass(frozen=True)
@@ -189,7 +189,7 @@ def load_verified_plan(board: Board, path: Path) -> tuple[Action, ...]:
 
 
 def solve_prepared_game(
-    prepared: PreparedGame, *, timeout: float = 20.0,
+    prepared: PreparedGame, *, timeout: float = DEFAULT_SOLVE_TIMEOUT,
     progress: Callable[[str], None] | None = None,
 ) -> tuple[Board, tuple[Action, ...]]:
     if timeout <= 0:
@@ -200,8 +200,6 @@ def solve_prepared_game(
     board = Board.from_files(prepared.cards_path, prepared.coverage_path)
     if prepared.solution_path.is_file():
         return board, load_verified_plan(board, prepared.solution_path)
-    # A search can exhaust its state cap before the wall-clock deadline. Try
-    # another ordering while time remains instead of presenting a partial path.
     deadline = time.monotonic() + timeout
     attempt = 0
     total_states = 0

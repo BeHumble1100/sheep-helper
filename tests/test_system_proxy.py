@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -9,6 +10,32 @@ from sheep_helper.system_proxy import CAPTURE_PROXY, UPSTREAM_PROXY, CaptureProx
 
 
 class SystemProxyTests(unittest.TestCase):
+    def test_frozen_watchdog_does_not_reuse_the_owner_extraction_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = CaptureProxy(Path(directory))
+            with patch("sheep_helper.system_proxy._read_proxy", return_value=(1, UPSTREAM_PROXY)), patch(
+                    "sheep_helper.system_proxy._write_proxy"), patch(
+                    "sheep_helper.system_proxy.sys.frozen", True, create=True), patch.dict(
+                    os.environ, {"PYINSTALLER_RESET_ENVIRONMENT": "0"}), patch(
+                    "sheep_helper.system_proxy.subprocess.Popen") as launch:
+                manager.activate()
+                self.assertEqual(launch.call_args.kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+                self.assertEqual(os.environ["PYINSTALLER_RESET_ENVIRONMENT"], "0")
+
+    def test_port_7897_is_restored_after_owner_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manager = CaptureProxy(Path(directory))
+            with patch("sheep_helper.system_proxy._read_proxy", return_value=(1, "127.0.0.1:7897")), patch(
+                    "sheep_helper.system_proxy._write_proxy"), patch(
+                    "sheep_helper.system_proxy.subprocess.Popen"):
+                manager.activate()
+            with patch("sheep_helper.system_proxy._pid_alive", return_value=False), patch(
+                    "sheep_helper.system_proxy._read_proxy", return_value=(1, CAPTURE_PROXY)), patch(
+                    "sheep_helper.system_proxy._write_proxy") as restore:
+                self.assertTrue(recover_stale_proxy(manager.path))
+            restore.assert_called_once_with(1, "127.0.0.1:7897")
+            self.assertFalse(manager.path.exists())
+
     def test_activate_and_restore_preserves_original_setting(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             manager = CaptureProxy(Path(directory))

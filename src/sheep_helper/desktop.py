@@ -14,7 +14,7 @@ import tkinter as tk
 from tkinter import messagebox
 
 from sheep_helper import guide_ui
-from sheep_helper.system_proxy import watch_owner
+from sheep_helper.system_proxy import watch_owner, start_proxy_watchdog
 
 
 def default_capture_dir() -> Path:
@@ -46,8 +46,9 @@ def self_test(output: Path, *, probe_capture: bool = False) -> bool:
     result = {
         "packaged": bool(getattr(sys, "frozen", False)),
         "addon_sources": present,
-        "mitmdump": shutil.which("mitmdump"),
+        "mitmdump": guide_ui._find_mitmdump(),
         "capture_dir": str(default_capture_dir()),
+        "extraction_dir": str(sys._MEIPASS) if getattr(sys, "frozen", False) else None,
     }
     if probe_capture:
         process = None
@@ -61,6 +62,11 @@ def self_test(output: Path, *, probe_capture: bool = False) -> bool:
                         raise RuntimeError("测试抓包进程未启动")
                     time.sleep(0.5)
                     result["capture_probe"] = process.poll() is None
+                    result["capture_addon"] = str(process.args[process.args.index("-s") + 1])
+                    # Exercise the real independent watcher without touching
+                    # Windows proxy settings: this recovery file never exists.
+                    watcher = start_proxy_watchdog(Path(temporary) / "unused-restore.json", os.getpid())
+                    result["watchdog_pid"] = watcher.pid
                 finally:
                     if process is not None and process.poll() is None:
                         process.terminate()
@@ -76,7 +82,7 @@ def self_test(output: Path, *, probe_capture: bool = False) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="羊了个羊：星球 · 手动通关指引")
     parser.add_argument("--capture-dir", type=Path, default=default_capture_dir())
-    parser.add_argument("--timeout", type=float, default=20.0)
+    parser.add_argument("--timeout", type=float, default=guide_ui.DEFAULT_SOLVE_TIMEOUT)
     parser.add_argument("--no-start-capture", action="store_true")
     parser.add_argument("--latest", action="store_true")
     parser.add_argument("--self-test", type=Path, help=argparse.SUPPRESS)

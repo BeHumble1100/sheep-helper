@@ -19,6 +19,7 @@ from typing import Callable, Iterable, Literal
 
 
 TRAY_LIMIT = 6
+DEFAULT_SOLVE_TIMEOUT = 20.0
 ActionKind = Literal["board", "park", "move_out", "revive_move_out"]
 Action = tuple[ActionKind, int]
 

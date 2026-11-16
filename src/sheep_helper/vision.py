@@ -274,3 +274,78 @@ def visibly_changed(before: Image.Image, after: Image.Image, minimum: float = 12
         return False
     difference = ImageChops.difference(before.convert("L"), after.convert("L"))
     return ImageStat.Stat(difference).mean[0] >= minimum
+
+
+def find_parked_cards(
+    image: Image.Image, cell: float, occupied: tuple[bool, bool, bool],
+) -> dict[int, tuple[float, float, float]]:
+    """Locate the smaller three-column move-out area; reject ambiguous rows.
+
+    The move-out and board containers can have different scales. Anchor the
+    search immediately above the wide green tray, independently of board pitch.
+    Empty columns retain their original index.
+    """
+    if cell < 16 or not any(occupied):
+        return {}
+    scale = 2
+    width, height = image.size
+    if width < 100 or height < 200:
+        return {}
+    rgb = image.convert("RGB")
+    colors = rgb.load()
+    bands: list[list[int]] = []
+    for y in range(round(height * 0.60), round(height * 0.93)):
+        green = 0
+        for fraction in (0.045, 0.05, 0.95, 0.955):
+            red, channel, blue = colors[round(width * fraction), y]
+            green += red < 180 and channel > red * 1.25 and channel > blue * 1.5
+        if green >= 3:
+            if not bands or y != bands[-1][-1] + 1:
+                bands.append([])
+            bands[-1].append(y)
+    bands = [band for band in bands if height * 0.045 <= len(band) <= height * 0.18]
+    if len(bands) != 1:
+        return {}
+    tray_top = bands[0][0]
+    pitch = width / 9
+    top = max(round(height * 0.48), round(tray_top - pitch * 2.2))
+    bottom = round(tray_top - pitch * 0.12)
+    small = rgb.crop((0, top, width, bottom))
+    small = small.resize((max(1, width // scale), max(1, (bottom - top) // scale)))
+    pixels = small.load()
+    sw, sh = small.size
+    mask = {(x, y) for y in range(sh) for x in range(sw)
+            if pixels[x, y][0] >= 210 and pixels[x, y][2] >= 160}
+    candidates = []
+    while mask:
+        seed = mask.pop()
+        pending = [seed]
+        xs, ys = [], []
+        while pending:
+            x, y = pending.pop()
+            xs.append(x)
+            ys.append(y)
+            for point in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                if point in mask:
+                    mask.remove(point)
+                    pending.append(point)
+        left, right = min(xs) * scale, (max(xs) + 1) * scale
+        upper, lower = min(ys) * scale + top, (max(ys) + 1) * scale + top
+        side = right - left
+        if (pitch * 0.70 <= side <= pitch * 1.20
+                and side * 0.88 <= lower - upper <= side * 1.3
+                and len(xs) * scale * scale >= side * side * 0.35):
+            candidates.append(((left + right) / 2, upper + side / 2, side / 0.9))
+    slots = [i for i, present in enumerate(occupied) if present]
+    from itertools import combinations
+    fits = []
+    for group in combinations(sorted(candidates), len(slots)):
+        first = group[0]
+        if any(abs(point[1] - first[1]) > pitch * 0.22
+               or abs(point[2] - first[2]) > pitch * 0.1 for point in group):
+            continue
+        if any(abs((point[0] - first[0]) - (slot - slots[0]) * pitch) > pitch * 0.22
+               for slot, point in zip(slots, group)):
+            continue
+        fits.append(dict(zip(slots, group)))
+    return fits[0] if len(fits) == 1 else {}
