@@ -79,18 +79,49 @@ def self_test(output: Path, *, probe_capture: bool = False) -> bool:
     return all(present.values()) and (not probe_capture or result["capture_probe"])
 
 
+def solver_probe(manifest: Path) -> bool:
+    """Offline release check: bypass saved solutions and exercise packaged search."""
+    from sheep_helper.compact_solver import backend_path
+    from sheep_helper.live import _solve_portfolio
+    from sheep_helper.solver import Board, result_to_dict
+
+    job = json.loads(manifest.read_text(encoding="utf-8"))
+    output = Path(job["output"])
+    try:
+        board = Board.from_files(Path(job["cards"]), Path(job["coverage"]))
+        seconds = float(job.get("seconds", 60))
+        if not 0 < seconds <= 3600:
+            raise ValueError("Invalid probe timeout")
+        if backend_path(board) is None:
+            raise RuntimeError("Packaged compact backend is unavailable")
+        started = time.monotonic()
+        result = _solve_portfolio(board, seconds, output.parent / ".solver-runtime")
+        report = result_to_dict(board, result)
+        report.update(packaged=bool(getattr(sys, "frozen", False)),
+                      cold_start=True, wall_seconds=time.monotonic() - started,
+                      backend=str(backend_path(board)))
+    except Exception as error:
+        report = {"solved": False, "error": str(error)}
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return report["solved"] is True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="羊了个羊：星球 · 手动通关指引")
     parser.add_argument("--capture-dir", type=Path, default=default_capture_dir())
-    parser.add_argument("--timeout", type=float, default=guide_ui.DEFAULT_SOLVE_TIMEOUT)
+    parser.add_argument("--timeout", type=float, default=None, help="覆盖已保存的求解时限；未设置过时默认 20 秒")
     parser.add_argument("--no-start-capture", action="store_true")
     parser.add_argument("--latest", action="store_true")
     parser.add_argument("--self-test", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--probe-capture", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--probe-solver", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--smoke", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--proxy-watchdog", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--owner-pid", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.probe_solver is not None:
+        return 0 if solver_probe(args.probe_solver) else 1
     if args.proxy_watchdog is not None:
         if args.owner_pid is None or args.owner_pid <= 0:
             return 2

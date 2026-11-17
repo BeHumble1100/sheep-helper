@@ -8,9 +8,13 @@ as a playable plan.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import math
 from pathlib import Path
+import queue
+import threading
 import time
 from typing import Callable
 from urllib.request import urlopen
@@ -19,6 +23,7 @@ from .map_format import decode_map
 from .capture_state import safe_game_route, valid_map_ids
 from .pipeline import validate_seed_record, write_session
 from .session import ManualPlaySession
+from .compact_solver import backend_path, solve_compact
 from .solver import Action, Board, DFSConfig, SolveResult, replay, result_to_dict, solve_hybrid, DEFAULT_SOLVE_TIMEOUT
 
 
@@ -191,8 +196,9 @@ def load_verified_plan(board: Board, path: Path) -> tuple[Action, ...]:
 def solve_prepared_game(
     prepared: PreparedGame, *, timeout: float = DEFAULT_SOLVE_TIMEOUT,
     progress: Callable[[str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[Board, tuple[Action, ...]]:
-    if timeout <= 0:
+    if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("求解最长时间必须大于零")
     cards = json.loads(prepared.cards_path.read_text(encoding="utf-8"))
     if any(int(tile.get("meta_type", 0)) == 2 for tile in cards["tiles"]):
@@ -200,39 +206,114 @@ def solve_prepared_game(
     board = Board.from_files(prepared.cards_path, prepared.coverage_path)
     if prepared.solution_path.is_file():
         return board, load_verified_plan(board, prepared.solution_path)
-    deadline = time.monotonic() + timeout
-    attempt = 0
-    total_states = 0
-    result: SolveResult | None = None
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        if progress is not None:
-            progress(f"正在求完整路线：第 {attempt + 1} 组搜索，剩余最多 {remaining:.0f} 秒")
-        candidate = solve_hybrid(board, DFSConfig(
-            time_limit_seconds=min(remaining, 20.0),
-            max_states=3_500_000,
-            max_branches=8,
-            restarts=1,
-            seed=attempt,
-        ))
-        total_states += candidate.explored_states
-        if candidate.solved:
-            result = candidate
-            break
-        attempt += 1
-    if result is None:
-        raise RuntimeError(
-            f"{timeout:g} 秒上限内未找到完整路线（{attempt} 组、{total_states} 状态）。"
-            "这不等于证明无解；建议重开关卡后再试。"
-        )
+    result = _solve_portfolio(board, timeout, prepared.solution_path.parent / ".solver-runtime",
+                              progress, cancelled)
+    if cancelled is not None and cancelled():
+        raise RuntimeError("求解已取消")
     record = result_to_dict(board, result)
     record["map_md5"] = prepared.capture.map_id
     record["map_seed"] = json.loads(prepared.capture.seed_path.read_text(encoding="utf-8"))["map_seed"]
     moves = _board_actions(board, record)
     prepared.solution_path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
     return board, moves
+
+
+def _solve_portfolio(
+    board: Board, timeout: float, runtime_dir: Path,
+    progress: Callable[[str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+) -> SolveResult:
+    """Race complementary searches under one deadline; stop the losing worker.
+
+    Some layouts favor the original prefix heuristic, others need many compact
+    restarts. Both retain the full time budget and every winner is replayed.
+    """
+    started = time.monotonic()
+    deadline = started + timeout
+    stop = threading.Event()
+    results: queue.Queue[tuple[str, SolveResult | None, Exception | None]] = queue.Queue()
+
+    def should_stop() -> bool:
+        return stop.is_set() or (cancelled is not None and cancelled())
+
+    def legacy() -> SolveResult:
+        attempt = total_states = 0
+        while not should_stop():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if progress is not None:
+                progress(f"正在求完整路线：第 {attempt + 1} 组搜索，剩余最多 {remaining:.0f} 秒")
+            candidate = solve_hybrid(board, DFSConfig(
+                time_limit_seconds=min(remaining, 20.0), max_states=3_500_000,
+                max_branches=8, restarts=1, seed=attempt, cancelled=should_stop,
+            ))
+            total_states += candidate.explored_states
+            if candidate.solved:
+                return candidate
+            attempt += 1
+        return SolveResult(False, (), total_states, None, time.monotonic() - started,
+                           f"{attempt} search groups")
+
+    def worker(name: str, search: Callable[[], SolveResult | None]) -> None:
+        try:
+            result = search()
+            if result is not None and result.solved:
+                final = replay(board, result.moves)
+                if final.remaining or final.tray or any(final.parked) or final.moves != result.moves:
+                    raise ValueError("搜索路线未通过独立完整回放")
+            results.put((name, result, None))
+        except Exception as error:
+            results.put((name, None, error))
+
+    binary = backend_path(board) if timeout >= 1 else None
+    searches: list[tuple[str, Callable[[], SolveResult | None]]] = [("legacy", legacy)]
+    if binary is not None:
+        if progress is not None:
+            progress("正在并行搜索：原算法与多前缀快速搜索，共用求解时限")
+        searches.append(("compact", lambda: solve_compact(
+            board, max(0.001, deadline - time.monotonic()), binary, runtime_dir, should_stop)))
+    total_states = 0
+    errors: list[str] = []
+    pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="sheep-search") if binary is not None else None
+    try:
+        for name, search in searches:
+            if pool is not None:
+                pool.submit(worker, name, search)
+            else:
+                worker(name, search)
+        pending = len(searches)
+        while pending:
+            if cancelled is not None and cancelled():
+                raise RuntimeError("求解已取消")
+            try:
+                name, result, error = results.get(timeout=0.05)
+            except queue.Empty:
+                # Native process is allowed a short output/exit grace period.
+                if time.monotonic() > deadline + 0.6:
+                    break
+                continue
+            pending -= 1
+            if error is not None:
+                errors.append(f"{name}: {error}")
+                if progress is not None and name == "compact":
+                    progress(f"快速搜索不可用，继续原算法：{error}")
+            elif result is not None:
+                total_states += result.explored_states
+                if result.solved:
+                    return result
+    finally:
+        stop.set()
+        if pool is not None:
+            pool.shutdown(wait=True)
+    if cancelled is not None and cancelled():
+        raise RuntimeError("求解已取消")
+    detail = f"；搜索异常：{' / '.join(errors)}" if errors else ""
+    raise RuntimeError(
+        f"{timeout:g} 秒上限内未找到完整路线（{total_states} 状态{detail}）。"
+        "这不等于证明无解；可提高求解时限后载入最近抓包重试（牌局须保持不变）。"
+        "若牌局已变，建议重开关卡后再试。"
+    )
 
 
 def _plan_digest(plan: tuple[Action, ...]) -> str:

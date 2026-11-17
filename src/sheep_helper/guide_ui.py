@@ -18,6 +18,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import messagebox
+from tkinter import ttk
 
 from PIL import ImageGrab
 
@@ -25,6 +26,7 @@ from .card_faces import board_region, face_name
 from .background import BackgroundFrames, post_click
 from .capture_state import CAPTURE_DONE_MARKER
 from .capture_runtime import prepare_capture_runtime
+from .guide_settings import load_timeout, save_timeout, validate_timeout
 from .live import GuidedPlay, fetch_missing_map, find_captured_game, load_verified_plan, prepare_captured_game, solve_prepared_game
 from .solver import Board, replay, DEFAULT_SOLVE_TIMEOUT
 from .system_proxy import CaptureProxy, recover_stale_proxy, _read_proxy, SUPPORTED_UPSTREAMS
@@ -265,7 +267,7 @@ class GuideApp:
     def __init__(
         self, *, capture_dir: Path, cards: Path | None = None, coverage: Path | None = None,
         solution: Path | None = None, latest: bool = False, start_capture: bool = True,
-        resume: bool = False, timeout: float = DEFAULT_SOLVE_TIMEOUT,
+        resume: bool = False, timeout: float | None = None,
     ) -> None:
         if sys.platform != "win32":
             raise RuntimeError("桌面高亮界面目前只支持 Windows")
@@ -280,7 +282,8 @@ class GuideApp:
             proxy_recovery_error = None
         except (OSError, ValueError) as error:
             proxy_recovery_error = str(error)
-        self.timeout = timeout
+        self.settings_file = capture_dir / "guide-settings.json"
+        self.timeout = load_timeout(self.settings_file) if timeout is None else validate_timeout(timeout)
         self.latest = latest
         self.start_capture_enabled = start_capture
         self.resume_requested = resume
@@ -319,8 +322,8 @@ class GuideApp:
 
         self.root = tk.Tk()
         self.root.title("羊了个羊：星球 · 通关指引")
-        self.root.geometry("560x680")
-        self.root.minsize(520, 620)
+        self.root.geometry("560x750")
+        self.root.minsize(520, 700)
         self.root.configure(bg=BG)
         self.root.attributes("-topmost", True)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -334,6 +337,7 @@ class GuideApp:
         self.center_y = tk.DoubleVar(value=250)
         self.cell_px = tk.DoubleVar(value=42)
         self.background_click = tk.BooleanVar(value=False)
+        self.timeout_text = tk.StringVar(value=f"{self.timeout:g}")
         self.background_frames: BackgroundFrames | None = None
         self._build_controls()
 
@@ -434,6 +438,17 @@ class GuideApp:
                                          bg=BG, fg=MUTED, relief="flat", bd=0,
                                          activebackground=BG, activeforeground=TEXT)
         self.advanced_button.pack(side="right")
+        timeout_row = tk.Frame(self.root, bg=BG)
+        timeout_row.pack(fill="x", padx=20, pady=(10, 0))
+        tk.Label(timeout_row, text="求解时限", bg=BG, fg=TEXT).pack(side="left")
+        self.timeout_input = ttk.Combobox(timeout_row, textvariable=self.timeout_text,
+                                         values=(20, 60, 120, 300, 600), width=7)
+        self.timeout_input.pack(side="left", padx=(8, 4))
+        tk.Label(timeout_row, text="秒", bg=BG, fg=TEXT).pack(side="left")
+        self.timeout_apply_button = tk.Button(timeout_row, text="应用", command=self._apply_timeout,
+                                             bg=PANEL, fg=ACCENT, relief="flat", padx=12)
+        self.timeout_apply_button.pack(side="left", padx=8)
+        tk.Label(timeout_row, text="下次求解生效 · 自动记住", bg=BG, fg=MUTED).pack(side="left")
         tk.Checkbutton(self.root, text="后台模拟点击（不占鼠标，窗口请勿最小化）",
                        variable=self.background_click, command=self._toggle_background_click,
                        bg=BG, fg=TEXT, selectcolor=PANEL, activebackground=BG,
@@ -470,11 +485,11 @@ class GuideApp:
         if self.advanced.winfo_manager():
             self.advanced.pack_forget()
             self.advanced_button.configure(text="校准微调 ▾")
-            self.root.geometry("560x680")
+            self.root.geometry("560x750")
         else:
             self.advanced.pack(fill="x", padx=20, pady=(10, 0))
             self.advanced_button.configure(text="收起微调 ▴")
-            self.root.geometry("560x780")
+            self.root.geometry("560x850")
 
     def _load_latest_capture(self) -> None:
         capture = find_captured_game(self.capture_dir, not_before=time.time() - 3600)
@@ -485,7 +500,22 @@ class GuideApp:
         self.resume_requested = True
         self._begin_capture()
 
+    def _apply_timeout(self, *, show_status: bool = True) -> bool:
+        try:
+            seconds = save_timeout(self.settings_file, self.timeout_text.get())
+        except (OSError, ValueError) as error:
+            self.status.set(f"求解时限未保存：{error}")
+            return False
+        self.timeout = seconds
+        self.timeout_text.set(f"{seconds:g}")
+        if show_status:
+            self.status.set(f"求解时限已保存为 {seconds:g} 秒，下次求解生效。超时后可调高时限，保持牌局不变并载入最近抓包重试")
+        return True
+
     def _begin_capture(self) -> None:
+        if not self._apply_timeout(show_status=False):
+            self.latest = False
+            return
         if not self.latest:
             self.resume_requested = False
         try:
@@ -803,6 +833,7 @@ class GuideApp:
                 prepared = prepare_captured_game(capture, self.capture_dir)
                 board, plan = solve_prepared_game(
                     prepared, timeout=self.timeout,
+                    cancelled=lambda: self.closed.is_set() or epoch != self.capture_epoch,
                     progress=lambda status: self.events.put(("status", status, epoch)),
                 )
                 self.events.put(("ready", (board, plan, prepared.cards_path,

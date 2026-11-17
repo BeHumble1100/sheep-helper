@@ -13,6 +13,15 @@ if (-not (Test-Path -LiteralPath $pythonPath)) {
 $stagingDir = Join-Path $projectRoot 'build\release-dist'
 $specDir = Join-Path $projectRoot 'build\release-spec'
 $releaseDir = Join-Path $projectRoot 'dist'
+$nativeDir = Join-Path $projectRoot 'build\native'
+New-Item -ItemType Directory -Path $nativeDir -Force | Out-Null
+$nativeExe = Join-Path $nativeDir 'CompactSolver.exe'
+$compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+if (-not (Test-Path -LiteralPath $compiler)) {
+    $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe'
+}
+& $compiler /nologo /optimize+ /r:System.Web.Extensions.dll "/out:$nativeExe" "$projectRoot\src\sheep_helper\native\CompactSolver.cs"
+if ($LASTEXITCODE -ne 0) { throw 'Compact solver compilation failed; existing release preserved.' }
 
 & $pythonPath -m PyInstaller `
     --noconfirm `
@@ -23,6 +32,7 @@ $releaseDir = Join-Path $projectRoot 'dist'
     --specpath $specDir `
     --paths "$projectRoot\src" `
     --exclude-module numpy `
+    --add-binary "$nativeExe;sheep_helper" `
     --add-data "$projectRoot/src/sheep_helper/__init__.py;sheep_helper" `
     --add-data "$projectRoot/src/sheep_helper/capture_state.py;sheep_helper" `
     --add-data "$projectRoot/src/sheep_helper/extractor.py;sheep_helper" `

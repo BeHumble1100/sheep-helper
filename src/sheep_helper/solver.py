@@ -161,6 +161,7 @@ class DFSConfig:
     move_out_min_tray: int = 5
     order_jitter: float = 12.0
     layer_weight: float = 2.0
+    cancelled: Callable[[], bool] | None = None
 
 
 def _iter_bits(mask: int) -> Iterable[int]:
@@ -497,7 +498,7 @@ def solve_dfs(
     restarts_run = 0
 
     for restart in range(config.restarts):
-        if explored >= config.max_states or time.monotonic() - started >= config.time_limit_seconds:
+        if (config.cancelled is not None and config.cancelled()) or explored >= config.max_states or time.monotonic() - started >= config.time_limit_seconds:
             break
         restarts_run += 1
         restart_deadline = started + config.time_limit_seconds * (restart + 1) / config.restarts
@@ -515,6 +516,7 @@ def solve_dfs(
             if explored % 512 == 0 and (
                 explored >= restart_state_limit
                 or time.monotonic() >= restart_deadline
+                or (config.cancelled is not None and config.cancelled())
             ):
                 return None
             if len(path) > len(best_moves):
@@ -564,7 +566,7 @@ def solve_dfs(
                 if result is not None:
                     return result
                 del path[-len(emitted):]
-                if explored >= restart_state_limit or time.monotonic() >= restart_deadline:
+                if (config.cancelled is not None and config.cancelled()) or explored >= restart_state_limit or time.monotonic() >= restart_deadline:
                     return None
             return None
 
@@ -689,7 +691,7 @@ def solve_counts(
         return remaining, available
 
     for restart in range(config.restarts):
-        if explored >= config.max_states or time.monotonic() >= deadline:
+        if (config.cancelled is not None and config.cancelled()) or explored >= config.max_states or time.monotonic() >= deadline:
             break
         restarts_run += 1
         rng = random.Random(config.seed + restart)
@@ -703,7 +705,7 @@ def solve_counts(
         def visit(remaining: int, available: int, occupied: int) -> bool:
             nonlocal explored, best
             explored += 1
-            if explored % 512 == 0 and (explored >= restart_state_limit or time.monotonic() >= restart_deadline):
+            if explored % 512 == 0 and ((config.cancelled is not None and config.cancelled()) or explored >= restart_state_limit or time.monotonic() >= restart_deadline):
                 return False
             improved = len(path) > len(best)
             if improved:
@@ -743,7 +745,7 @@ def solve_counts(
                 path.pop()
                 counts[type_index] = old
                 remaining_counts[type_index] += 1
-                if explored >= restart_state_limit or time.monotonic() >= restart_deadline:
+                if (config.cancelled is not None and config.cancelled()) or explored >= restart_state_limit or time.monotonic() >= restart_deadline:
                     return False
             return False
 
@@ -771,7 +773,7 @@ def solve_hybrid(board: Board, config: DFSConfig = DFSConfig()) -> SolveResult:
     attempts_run = 0
     for attempt in range(config.restarts):
         remaining_time = config.time_limit_seconds - (time.monotonic() - started)
-        if remaining_time <= 0 or explored >= config.max_states:
+        if (config.cancelled is not None and config.cancelled()) or remaining_time <= 0 or explored >= config.max_states:
             break
         attempts_run += 1
         attempt_time = min(remaining_time, config.time_limit_seconds / config.restarts)
@@ -784,6 +786,7 @@ def solve_hybrid(board: Board, config: DFSConfig = DFSConfig()) -> SolveResult:
             seed=config.seed + attempt,
             order_jitter=config.order_jitter,
             layer_weight=config.layer_weight,
+            cancelled=config.cancelled,
         ))
         explored += normal.explored_states
         if normal.solved:
@@ -805,6 +808,7 @@ def solve_hybrid(board: Board, config: DFSConfig = DFSConfig()) -> SolveResult:
             move_out_min_tray=config.move_out_min_tray,
             order_jitter=config.order_jitter,
             layer_weight=config.layer_weight,
+            cancelled=config.cancelled,
         ), initial_state=prefix_state)
         explored += tool.explored_states
         combined = prefix + tool.moves

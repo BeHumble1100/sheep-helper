@@ -10,7 +10,6 @@ from .har import iter_har_payloads
 from .map_format import decode_map
 from .pipeline import map_id_from_path, validate_seed_record, write_session
 from .session import ManualPlaySession
-from .solver import DEFAULT_SOLVE_TIMEOUT
 from .solver import DFSConfig, Board, MCTSConfig, SearchConfig, result_to_dict, solve, solve_batches, solve_counts, solve_dfs, solve_hybrid, solve_mcts
 
 
@@ -205,7 +204,7 @@ def main() -> int:
     advise_parser.add_argument("--branches", type=int, default=7)
     guide_parser = subparsers.add_parser("guide", help="抓取新局、限时求解并在游戏窗口标记下一步（不自动点击）")
     guide_parser.add_argument("--capture-dir", type=Path, default=Path("captured-layouts"))
-    guide_parser.add_argument("--timeout", type=float, default=DEFAULT_SOLVE_TIMEOUT, help="每局求解最长秒数，默认 20；超时提示重开")
+    guide_parser.add_argument("--timeout", type=float, default=None, help="覆盖已保存的求解时限；未设置过时默认 20 秒")
     guide_parser.add_argument("--latest", action="store_true", help="使用最近已捕获的局；默认仅等待启动后的新局")
     guide_parser.add_argument("--no-start-capture", action="store_true", help="使用已运行的本机抓包代理")
     guide_parser.add_argument("--resume", action="store_true", help="按相同路线的进度文件恢复；须先核对游戏画面")
@@ -251,8 +250,8 @@ def main() -> int:
             args.cards, args.coverage, args.time_limit, args.max_states, args.branches
         )
     if args.command == "guide":
-        if args.timeout <= 0:
-            parser.error("--timeout 必须大于零")
+        if args.timeout is not None and not 1 <= args.timeout <= 3600:
+            parser.error("--timeout 必须为 1～3600 秒")
         from .guide_ui import run_guide
         run_guide(
             capture_dir=args.capture_dir,
