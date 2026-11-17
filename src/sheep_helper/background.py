@@ -117,9 +117,10 @@ class BackgroundFrames:
         self.target = target
         self.wake.set()
 
-    def frame(self, target: tuple[int, int, int]) -> Image.Image:
+    def frame(self, target: tuple[int, int, int], *, not_before: float = 0.0) -> Image.Image:
         item = self.latest
-        if item is None or item[0] != target or time.monotonic() - item[1] > 0.8:
+        if (item is None or item[0] != target or item[1] < not_before
+                or time.monotonic() - item[1] > 0.8):
             raise OSError(self.error or "background frame is not ready")
         return item[2]
 
@@ -131,8 +132,9 @@ class BackgroundFrames:
             if target is None:
                 continue
             try:
+                captured_at = time.monotonic()
                 image = capture_client(*target)
-                self.latest = (target, time.monotonic(), image)
+                self.latest = (target, captured_at, image)
                 self.error = None
             except OSError as error:
                 self.latest = None

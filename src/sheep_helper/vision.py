@@ -314,11 +314,16 @@ def find_parked_cards(
     small = small.resize((max(1, width // scale), max(1, (bottom - top) // scale)))
     pixels = small.load()
     sw, sh = small.size
+    # Adjacent pale faces can touch after scaling/downsampling. Segment each
+    # fixed column independently so two cards never become one wide component.
+    columns = {x: round((x * scale - width / 2) / pitch) + 1 for x in range(sw)}
     mask = {(x, y) for y in range(sh) for x in range(sw)
-            if pixels[x, y][0] >= 210 and pixels[x, y][2] >= 160}
-    candidates = []
+            if 0 <= columns[x] < 3 and occupied[columns[x]]
+            and pixels[x, y][0] >= 210 and pixels[x, y][2] >= 160}
+    candidates: dict[int, list[tuple[float, float, float]]] = {slot: [] for slot in range(3)}
     while mask:
         seed = mask.pop()
+        slot = columns[seed[0]]
         pending = [seed]
         xs, ys = [], []
         while pending:
@@ -326,7 +331,7 @@ def find_parked_cards(
             xs.append(x)
             ys.append(y)
             for point in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
-                if point in mask:
+                if point in mask and columns[point[0]] == slot:
                     mask.remove(point)
                     pending.append(point)
         left, right = min(xs) * scale, (max(xs) + 1) * scale
@@ -335,14 +340,17 @@ def find_parked_cards(
         if (pitch * 0.70 <= side <= pitch * 1.20
                 and side * 0.88 <= lower - upper <= side * 1.3
                 and len(xs) * scale * scale >= side * side * 0.35):
-            candidates.append(((left + right) / 2, upper + side / 2, side / 0.9))
+            center_x = (left + right) / 2
+            expected_x = width / 2 + (slot - 1) * pitch
+            if abs(center_x - expected_x) <= pitch * 0.24:
+                candidates[slot].append((center_x, upper + side / 2, side / 0.9))
     slots = [i for i, present in enumerate(occupied) if present]
-    from itertools import combinations
+    from itertools import product
     fits = []
-    for group in combinations(sorted(candidates), len(slots)):
+    for group in product(*(candidates[slot] for slot in slots)):
         first = group[0]
         if any(abs(point[1] - first[1]) > pitch * 0.22
-               or abs(point[2] - first[2]) > pitch * 0.1 for point in group):
+               or abs(point[2] - first[2]) > pitch * 0.16 for point in group):
             continue
         if any(abs((point[0] - first[0]) - (slot - slots[0]) * pitch) > pitch * 0.22
                for slot, point in zip(slots, group)):

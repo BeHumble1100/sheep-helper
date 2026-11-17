@@ -46,6 +46,7 @@ PANEL = "#15243a"
 MUTED = "#91a5bf"
 TEXT = "#edf5ff"
 ACCENT = "#55e5bd"
+AUTO_CLICK_MIN_INTERVAL = 0.55
 
 
 def tile_center(
@@ -316,6 +317,8 @@ class GuideApp:
         self._target_bbox: tuple[int, int, int, int] | None = None
         self._target_adjustment = (0.0, 0.0)
         self._target_adjustment_step = -1
+        self._snapshot_not_before = time.monotonic()
+        self._park_wait = None
         self.last_rect: tuple[int, int, int, int, int] | None = None
         self.calibration_file = capture_dir / "guide-calibration.json"
         self.saved_calibration = self._read_calibration()
@@ -1055,6 +1058,8 @@ class GuideApp:
         self._target_adjustment = (0.0, 0.0)
         self._target_adjustment_step = -1
         if kind in ("board", "park") and self.auto_verified and self.calibrated:
+            self._snapshot_not_before = time.monotonic()
+            self._park_wait = None
             self.root.after(250, self._capture_target_snapshot)
 
     def _toggle_calibration(self) -> None:
@@ -1169,7 +1174,7 @@ class GuideApp:
         self.status.set("后台模拟点击已开启；核对准心后开启自动点击，可切换其他窗口，请勿最小化游戏"
                         if self.background_click.get() else "已恢复前台鼠标点击；请重新开启自动点击")
 
-    def _grab_game_region(self, bbox):
+    def _grab_game_region(self, bbox, *, not_before: float = 0.0):
         if not self.background_click.get():
             return ImageGrab.grab(bbox=bbox, all_screens=True)
         if self.last_rect is None:
@@ -1179,7 +1184,7 @@ class GuideApp:
             self.background_frames = BackgroundFrames()
         target = (hwnd, width, height)
         self.background_frames.request(target)
-        frame = self.background_frames.frame(target)
+        frame = self.background_frames.frame(target, not_before=not_before)
         x1, y1, x2, y2 = bbox
         if not (left <= x1 < x2 <= left + width and top <= y1 < y2 <= top + height):
             raise OSError("截图范围超出游戏窗口")
@@ -1191,7 +1196,7 @@ class GuideApp:
                 or not self.calibrated or self.paused or self.pending_revive
                 or self.calibration_pending or self.waiting_for_second
                 or self.guide.next_action is None or self.guide.next_action[0] not in ("board", "park")
-                or time.monotonic() - self.last_auto_click < 1.0):
+                or time.monotonic() - self.last_auto_click < AUTO_CLICK_MIN_INTERVAL):
             return
         step = self.guide.confirmed
         if (self.auto_click_pending_step == step or self._pending_click_step == step
@@ -1257,7 +1262,8 @@ class GuideApp:
             hwnd, left, top, width, height = self.last_rect
             key = (self.capture_epoch, self.guide.confirmed, hwnd, width, height)
             try:
-                self._grab_game_region((left, top, left + width, top + height))
+                self._grab_game_region((left, top, left + width, top + height),
+                                       not_before=getattr(self, "_snapshot_not_before", 0.0))
                 self._background_wait = None
             except OSError as error:
                 waiting = getattr(self, "_background_wait", None)
@@ -1269,21 +1275,48 @@ class GuideApp:
                     self._disable_auto_click()
                     self.status.set(f"后台画面不可用，已停止模拟点击：{error}")
                 return
+        parked_frame = None
         if self.guide.next_action is not None and self.guide.next_action[0] == "park":
             self._park_geometry_step = -1
             _hwnd, left, top, width, height = self.last_rect
             try:
-                frame = self._grab_game_region((left, top, left + width, top + height))
-                found = find_parked_cards(frame, self.cell_px.get(),
+                parked_frame = self._grab_game_region(
+                    (left, top, left + width, top + height),
+                    not_before=getattr(self, "_snapshot_not_before", 0.0))
+                found = find_parked_cards(parked_frame, self.cell_px.get(),
                                           tuple(bool(slot) for slot in self.guide.session.state.parked))
             except OSError:
                 found = {}
             self._park_geometry = found.get(self.guide.next_action[1])
             if self._park_geometry is None:
-                self._disable_auto_click()
-                self.status.set("未能唯一定位移出区牌；请保持游戏可见，重新对齐或手动取回并确认")
+                key = (self.capture_epoch, self.guide.confirmed, self.last_rect)
+                waiting = getattr(self, "_park_wait", None)
+                if waiting is None or waiting[0] != key:
+                    waiting = self._park_wait = (key, time.monotonic())
+                if time.monotonic() - waiting[1] < 2.5:
+                    self.status.set("正在重新识别暂存区，等待移出或复活动画结束…")
+
+                    def retry() -> None:
+                        if (not self.closed.is_set() and self.guide is not None
+                                and key == (self.capture_epoch, self.guide.confirmed, self.last_rect)
+                                and self._snapshot_step != self.guide.confirmed):
+                            self._capture_target_snapshot()
+
+                    self.root.after(150, retry)
+                else:
+                    self._disable_auto_click()
+                    self.status.set("未能唯一定位移出区牌；请保持游戏可见，重新对齐或手动取回并确认")
                 return
+            self._park_wait = None
             self._park_geometry_step = self.guide.confirmed
+
+        def grab_target(bbox):
+            if parked_frame is not None:
+                _hwnd, frame_left, frame_top, _width, _height = self.last_rect
+                x1, y1, x2, y2 = bbox
+                return parked_frame.crop((x1 - frame_left, y1 - frame_top,
+                                          x2 - frame_left, y2 - frame_top))
+            return self._grab_game_region(bbox)
         geometry = self._target_geometry()
         if geometry is None:
             return
@@ -1302,7 +1335,7 @@ class GuideApp:
         search_bbox = (round(left + x) - search_half, round(top + y) - search_half,
                        round(left + x) + search_half, round(top + y) + search_half)
         try:
-            search_image = self._grab_game_region(search_bbox)
+            search_image = grab_target(search_bbox)
             refined = find_exposed_card_center(search_image, search_half, search_half, cell)
         except OSError:
             refined = None
@@ -1318,7 +1351,7 @@ class GuideApp:
         bbox = (screen_x - radius, screen_y - radius,
                 screen_x + radius, screen_y + radius)
         try:
-            snapshot = self._grab_game_region(bbox).convert("L")
+            snapshot = grab_target(bbox).convert("L")
         except OSError:
             self._target_snapshot = None
             self._target_bbox = None
@@ -1380,7 +1413,9 @@ class GuideApp:
             changed = False
         if changed:
             self.auto_click_pending_step = -1
-            self.last_auto_click = time.monotonic()
+            # Pace from the actual click, not its delayed visual confirmation.
+            # The next step still waits for its own target snapshot before
+            # clicking; restarting the clock here added a redundant 1 s pause.
             self.status.set("已识别目标砖块的点击与画面变化，自动推进到下一步")
             self._confirm(visual_confirmed=True)
         else:

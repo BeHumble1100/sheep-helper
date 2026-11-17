@@ -5,7 +5,8 @@ import time
 import tkinter as tk
 import unittest
 
-from sheep_helper.background import capture_client, post_click
+from sheep_helper.background import BackgroundFrames, capture_client, post_click
+from PIL import Image
 
 
 class Point(ctypes.Structure):
@@ -14,6 +15,17 @@ class Point(ctypes.Structure):
 
 @unittest.skipUnless(sys.platform == "win32", "Windows window messages")
 class BackgroundTests(unittest.TestCase):
+    def test_cached_frame_must_be_newer_than_current_step(self):
+        frames = BackgroundFrames.__new__(BackgroundFrames)
+        target = (1, 100, 200)
+        image = Image.new("RGB", (100, 200))
+        frames.error = None
+        now = time.monotonic()
+        frames.latest = (target, now, image)
+        self.assertIs(frames.frame(target, not_before=now - 0.1), image)
+        with self.assertRaises(OSError):
+            frames.frame(target, not_before=now + 0.1)
+
     def test_message_click_reaches_child_without_moving_cursor_or_focus(self):
         root = tk.Tk()
         try:

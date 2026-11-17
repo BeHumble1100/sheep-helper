@@ -675,6 +675,46 @@ class LiveGuideTests(unittest.TestCase):
                 app.close()
 
     @unittest.skipUnless(sys.platform == "win32", "Windows guide only")
+    def test_visual_confirmation_does_not_restart_click_cooldown(self) -> None:
+        board = Board.from_files(CARDS, COVERAGE)
+        plan = load_verified_plan(board, SOLUTION)
+        with tempfile.TemporaryDirectory() as directory:
+            app = GuideApp(capture_dir=Path(directory), start_capture=False)
+            try:
+                app._set_guide(board, plan, CARDS, Path(directory) / "progress.json")
+                app.last_rect = (1, 0, 0, 565, 1006)
+                app.center_x.set(282)
+                app.center_y.set(435)
+                app.cell_px.set(52)
+                app.calibrated = app.auto_verified = True
+                app.background_click.set(True)
+                app.auto_click_enabled = True
+                app._target_snapshot = before = Image.new("L", (20, 20), "white")
+                app._target_bbox = bbox = (0, 0, 20, 20)
+                app._snapshot_step = 0
+                user32 = Mock()
+                with patch.object(app.root, "after"), patch("sheep_helper.guide_ui.post_click") as send:
+                    with patch("sheep_helper.guide_ui.time.monotonic", return_value=100.0):
+                        app._maybe_auto_click(user32, 1, 0, 0, 565, 1006)
+                    with patch("sheep_helper.guide_ui.time.monotonic", return_value=100.8):
+                        app._maybe_auto_click(user32, 1, 0, 0, 565, 1006)
+                    send.assert_called_once()  # Still awaiting the previous click.
+                    with patch.object(app, "_grab_game_region", return_value=Image.new("L", (20, 20))), patch(
+                            "sheep_helper.guide_ui.time.monotonic", return_value=100.8):
+                        app._verify_target_click(0, before, bbox)
+                    self.assertEqual(app.guide.confirmed, 1)
+                    self.assertEqual(app.last_auto_click, 100.0)
+                    with patch("sheep_helper.guide_ui.time.monotonic", return_value=100.9):
+                        app._maybe_auto_click(user32, 1, 0, 0, 565, 1006)
+                    send.assert_called_once()  # Next target has not been captured.
+                    app._target_snapshot, app._target_bbox, app._snapshot_step = before, bbox, 1
+                    with patch("sheep_helper.guide_ui.time.monotonic", return_value=100.95):
+                        app._maybe_auto_click(user32, 1, 0, 0, 565, 1006)
+                    self.assertEqual(send.call_count, 2)  # No extra 1 s after confirmation.
+            finally:
+                app.close()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows guide only")
     def test_parked_card_can_be_located_clicked_and_confirmed(self) -> None:
         folder = ROOT / "captured-layouts" / "session-1792609938426" / "verified"
         cards = next(folder.glob("*.cards.json"))
@@ -740,6 +780,51 @@ class LiveGuideTests(unittest.TestCase):
                 self.assertFalse(app.auto_click_enabled)
                 self.assertEqual(app.confirm_button["state"], "normal")
                 self.assertIn("自动点击已停止", app.status.get())
+            finally:
+                app.close()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows guide only")
+    def test_parked_animation_retries_without_clicking_and_times_out_safely(self) -> None:
+        folder = ROOT / "captured-layouts" / "session-1792609938426" / "verified"
+        cards = next(folder.glob("*.cards.json"))
+        board = Board.from_files(cards, next(folder.glob("*.coverage.json")))
+        plan = load_verified_plan(board, next(folder.glob("*.guide-solution.json")))
+        with tempfile.TemporaryDirectory() as directory:
+            app = GuideApp(capture_dir=Path(directory), start_capture=False)
+            try:
+                app._set_guide(board, plan, cards, Path(directory) / "progress.json")
+                for _ in range(174):
+                    app.guide._advance(save=False)
+                app.last_rect = (1, 0, 0, 565, 1006)
+                app.cell_px.set(52)
+                app.calibrated = app.auto_verified = app.auto_click_enabled = True
+                slot = app.guide.next_action[1]
+                frame = Image.new("RGB", (565, 1006), "#c5ff90")
+                with patch.object(app.root, "after") as schedule, patch.object(
+                        app, "_grab_game_region", return_value=frame) as grab, patch(
+                        "sheep_helper.guide_ui.find_parked_cards", return_value={}) as detect:
+                    with patch("sheep_helper.guide_ui.time.monotonic", return_value=100):
+                        app._capture_target_snapshot()
+                    self.assertTrue(app.auto_click_enabled)
+                    self.assertIsNone(app._target_geometry())
+                    self.assertEqual(app.guide.confirmed, 174)
+                    self.assertEqual(schedule.call_args.args[0], 150)
+                    retry = schedule.call_args.args[1]
+                    detect.return_value = {slot: (230, 730, 42)}
+                    grab.reset_mock()
+                    with patch("sheep_helper.guide_ui.time.monotonic", return_value=100.3):
+                        retry()
+                    self.assertEqual(app._snapshot_step, 174)
+                    self.assertTrue(app.auto_click_enabled)
+                    self.assertEqual(grab.call_count, 1)  # One frame for location and snapshot.
+                    app._update_step()
+                    detect.return_value = {}
+                    with patch("sheep_helper.guide_ui.time.monotonic", return_value=101):
+                        app._capture_target_snapshot()
+                    with patch("sheep_helper.guide_ui.time.monotonic", return_value=104):
+                        app._capture_target_snapshot()
+                    self.assertFalse(app.auto_click_enabled)
+                    self.assertEqual(app.guide.confirmed, 174)
             finally:
                 app.close()
 

@@ -17,6 +17,29 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class VisionTests(unittest.TestCase):
+    def test_touching_parked_faces_are_separated_for_single_and_double_stacks(self) -> None:
+        for occupied in ((True, True, True), (True, False, False), (False, True, True)):
+            for stacked in (False, True):
+                with self.subTest(occupied=occupied, stacked=stacked):
+                    image = Image.new("RGB", (450, 800), "#c5ff90")
+                    draw = ImageDraw.Draw(image)
+                    draw.rectangle((12, 640, 438, 724), fill="#55aa20")
+                    # Pale left/middle faces touch: the old global flood-fill
+                    # discarded their joined component and found only right.
+                    for slot, present in enumerate(occupied):
+                        if not present:
+                            continue
+                        x = 175 + slot * 50
+                        half = 25 if slot < 2 else 22
+                        top = 580 - (6 if stacked and slot != 2 else 0)
+                        draw.rectangle((x - half, top, x + half, 630), fill="#f5efd9")
+                        draw.ellipse((x - 7, top + 12, x + 7, top + 26), fill="#703a20")
+                    found = find_parked_cards(image, 65, occupied)
+                    self.assertEqual(set(found), {i for i, value in enumerate(occupied) if value})
+                    for slot, (x, y, _) in found.items():
+                        self.assertAlmostEqual(x, 175 + slot * 50, delta=2)
+                        self.assertAlmostEqual(y, 605 - (6 if stacked and slot != 2 else 0), delta=4)
+
     def test_parked_cards_keep_columns_and_choose_top_of_stack(self) -> None:
         for occupied in ((True, True, True), (False, True, True), (True, False, True)):
             with self.subTest(occupied=occupied):
