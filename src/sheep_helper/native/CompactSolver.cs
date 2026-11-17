@@ -34,8 +34,8 @@ class FastSolver {
  static uint Pop(uint p){return (p>>9)!=0?p&511U:0;}
  static uint Park(State s,int i){return i==0?s.p0:i==1?s.p1:s.p2;}
  static void SetPark(ref State s,int i,uint v){if(i==0)s.p0=v;else if(i==1)s.p1=v;else s.p2=v;}
- static bool Apply(State s,int act,out State t){
-  t=s;int[] buffer=new int[7];int len=0;ulong v=s.tray;while(v!=0){buffer[len++]=(int)(v&511)-1;v>>=9;}
+ static bool Apply(State s,int act,out State t,int[] buffer=null){
+  t=s;if(buffer==null)buffer=new int[7];int len=0;ulong v=s.tray;while(v!=0){buffer[len++]=(int)(v&511)-1;v>>=9;}
   if(act==-1){if((s.flags&1)!=0||len==0)return false;for(int i=0;i<Math.Min(3,len);i++)SetPark(ref t,i,Push(Park(t,i),buffer[i]));t.tray=s.tray>>Math.Min(3,len)*9;t.flags|=1;return true;}
   int card;
   if(act>=0){card=act;if(!s.avail.Has(card))return false;t.rem.Clear(card);t.avail.Clear(card);t.picked++;
@@ -86,7 +86,7 @@ class FastSolver {
   for(int i=1;i<num;i++){double val=sc[i];int act=acts[i],j=i-1;while(j>=0&&sc[j]<val){sc[j+1]=sc[j];acts[j+1]=acts[j];j--;}sc[j+1]=val;acts[j+1]=act;}
   for(int i=0;i<num;i++){
    int act=acts[i];if(i>=branches){if(act==-1)continue;int card=act>=0?act:Peek(Park(s,-act-2));if(cs[kinds[card]]!=2)continue;}
-   State child;if(!Apply(s,act,out child))continue;path[depth]=act;if(Visit(child,depth+1))return true;
+   State child;if(!Apply(s,act,out child,trays[depth]))continue;path[depth]=act;if(Visit(child,depth+1))return true;
    if(nodes>=stopNodes||clock.Elapsed.TotalSeconds>=deadline)return false;
   }
   return false;
@@ -106,7 +106,7 @@ class FastSolver {
    acts[num]=card;sc[num++]=val;
   }
   for(int i=1;i<num;i++){double val=sc[i];int act=acts[i],j=i-1;while(j>=0&&sc[j]<val){sc[j+1]=sc[j];acts[j+1]=acts[j];j--;}sc[j+1]=val;acts[j+1]=act;}
-  for(int i=0;i<Math.Min(6,num);i++){int card=acts[i];State child;if(!Apply(s,card,out child))continue;path[depth]=card;leftCounts[kinds[card]]--;
+  for(int i=0;i<Math.Min(6,num);i++){int card=acts[i];State child;if(!Apply(s,card,out child,trays[depth]))continue;path[depth]=card;leftCounts[kinds[card]]--;
    bool solved=VisitCounts(child,depth+1);leftCounts[kinds[card]]++;if(solved)return true;
    if(nodes>=stopNodes||clock.Elapsed.TotalSeconds>=deadline)return false;
   }

@@ -15,7 +15,7 @@ import tempfile
 
 from sheep_helper.compact_solver import verified_result
 from sheep_helper.solver import (
-    Board, SolveResult, _iter_bits, _materialize_actions, replay, result_to_dict,
+    Board, _iter_bits, replay, result_to_dict,
 )
 
 

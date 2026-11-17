@@ -817,6 +817,12 @@ class LiveGuideTests(unittest.TestCase):
                     self.assertEqual(app._snapshot_step, 174)
                     self.assertTrue(app.auto_click_enabled)
                     self.assertEqual(grab.call_count, 1)  # One frame for location and snapshot.
+                    app.background_click.set(True)
+                    app._update_step()
+                    grab.reset_mock()
+                    app._capture_target_snapshot()
+                    self.assertEqual(grab.call_count, 1)  # Background uses the same full frame too.
+                    self.assertEqual(app._snapshot_step, 174)
                     app._update_step()
                     detect.return_value = {}
                     with patch("sheep_helper.guide_ui.time.monotonic", return_value=101):

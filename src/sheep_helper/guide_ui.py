@@ -1258,12 +1258,14 @@ class GuideApp:
             return
         if self.guide is None or self.last_rect is None:
             return
+        target_frame = None
         if self.background_click.get():
             hwnd, left, top, width, height = self.last_rect
             key = (self.capture_epoch, self.guide.confirmed, hwnd, width, height)
             try:
-                self._grab_game_region((left, top, left + width, top + height),
-                                       not_before=getattr(self, "_snapshot_not_before", 0.0))
+                target_frame = self._grab_game_region(
+                    (left, top, left + width, top + height),
+                    not_before=getattr(self, "_snapshot_not_before", 0.0))
                 self._background_wait = None
             except OSError as error:
                 waiting = getattr(self, "_background_wait", None)
@@ -1275,15 +1277,15 @@ class GuideApp:
                     self._disable_auto_click()
                     self.status.set(f"后台画面不可用，已停止模拟点击：{error}")
                 return
-        parked_frame = None
         if self.guide.next_action is not None and self.guide.next_action[0] == "park":
             self._park_geometry_step = -1
             _hwnd, left, top, width, height = self.last_rect
             try:
-                parked_frame = self._grab_game_region(
-                    (left, top, left + width, top + height),
-                    not_before=getattr(self, "_snapshot_not_before", 0.0))
-                found = find_parked_cards(parked_frame, self.cell_px.get(),
+                if target_frame is None:
+                    target_frame = self._grab_game_region(
+                        (left, top, left + width, top + height),
+                        not_before=getattr(self, "_snapshot_not_before", 0.0))
+                found = find_parked_cards(target_frame, self.cell_px.get(),
                                           tuple(bool(slot) for slot in self.guide.session.state.parked))
             except OSError:
                 found = {}
@@ -1311,11 +1313,11 @@ class GuideApp:
             self._park_geometry_step = self.guide.confirmed
 
         def grab_target(bbox):
-            if parked_frame is not None:
+            if target_frame is not None:
                 _hwnd, frame_left, frame_top, _width, _height = self.last_rect
                 x1, y1, x2, y2 = bbox
-                return parked_frame.crop((x1 - frame_left, y1 - frame_top,
-                                          x2 - frame_left, y2 - frame_top))
+                return target_frame.crop((x1 - frame_left, y1 - frame_top,
+                                         x2 - frame_left, y2 - frame_top))
             return self._grab_game_region(bbox)
         geometry = self._target_geometry()
         if geometry is None:
