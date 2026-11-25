@@ -41,9 +41,11 @@ TRANSPARENT = "#010203"
 UPSTREAM_HOST = "127.0.0.1"
 UPSTREAM_PORT = 7890
 CAPTURE_PORT = 18888
-BG = "#0b1424"
-PANEL = "#15243a"
-MUTED = "#91a5bf"
+BG = "#101827"
+PANEL = "#192538"
+BORDER = "#2c3e55"
+STEP_PANEL = "#172f38"
+MUTED = "#a4b6ca"
 TEXT = "#edf5ff"
 ACCENT = "#55e5bd"
 AUTO_CLICK_MIN_INTERVAL = 0.55
@@ -325,8 +327,7 @@ class GuideApp:
 
         self.root = tk.Tk()
         self.root.title("羊了个羊：星球 · 通关指引")
-        self.root.geometry("560x750")
-        self.root.minsize(520, 700)
+        self.root.minsize(540, 1)
         self.root.configure(bg=BG)
         self.root.attributes("-topmost", True)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -366,7 +367,7 @@ class GuideApp:
 
     def _build_controls(self) -> None:
         header = tk.Frame(self.root, bg=BG)
-        header.pack(fill="x", padx=20, pady=(18, 12))
+        header.pack(fill="x", padx=20, pady=(22, 16))
         tk.Label(header, text="✦", font=("Segoe UI Symbol", 26), fg=ACCENT, bg=BG).pack(side="left", padx=(0, 12))
         titles = tk.Frame(header, bg=BG)
         titles.pack(side="left")
@@ -377,32 +378,35 @@ class GuideApp:
         tk.Label(header, textvariable=self.route_badge, font=("Microsoft YaHei UI", 9, "bold"),
                  fg=ACCENT, bg=PANEL, padx=10, pady=6).pack(side="right")
 
-        status_card = tk.Frame(self.root, bg=PANEL, padx=16, pady=12)
+        status_card = tk.Frame(self.root, bg=PANEL, padx=16, pady=12,
+                               highlightthickness=1, highlightbackground=BORDER)
         status_card.pack(fill="x", padx=20, pady=(0, 12))
         tk.Label(status_card, text="当前状态", font=("Microsoft YaHei UI", 9, "bold"),
                  fg=ACCENT, bg=PANEL).pack(anchor="w")
-        tk.Label(status_card, textvariable=self.status, wraplength=405, justify="left",
+        tk.Label(status_card, textvariable=self.status, wraplength=462, justify="left",
                  font=("Microsoft YaHei UI", 10), fg=TEXT, bg=PANEL).pack(anchor="w", pady=(5, 0))
 
-        step_card = tk.Frame(self.root, bg=PANEL, padx=16, pady=12)
+        step_card = tk.Frame(self.root, bg=STEP_PANEL, padx=16, pady=14,
+                             highlightthickness=1, highlightbackground="#365560")
         step_card.pack(fill="x", padx=20, pady=(0, 14))
-        step_header = tk.Frame(step_card, bg=PANEL)
+        step_header = tk.Frame(step_card, bg=STEP_PANEL)
         step_header.pack(fill="x")
         tk.Label(step_header, text="下一步", font=("Microsoft YaHei UI", 9, "bold"),
-                 fg=ACCENT, bg=PANEL).pack(side="left")
+                 fg=ACCENT, bg=STEP_PANEL).pack(side="left")
         tk.Label(step_header, textvariable=self.progress_text, font=("Microsoft YaHei UI", 9),
-                 fg=MUTED, bg=PANEL).pack(side="right")
-        tk.Label(step_card, textvariable=self.step_text, wraplength=405, justify="left",
-                 font=("Microsoft YaHei UI", 12, "bold"), fg=TEXT, bg=PANEL).pack(anchor="w", pady=(5, 0))
-        self.progress_bar = tk.Canvas(step_card, height=4, bg="#263a52", highlightthickness=0)
+                 fg=MUTED, bg=STEP_PANEL).pack(side="right")
+        tk.Label(step_card, textvariable=self.step_text, wraplength=462, justify="left",
+                 font=("Microsoft YaHei UI", 12, "bold"), fg=TEXT, bg=STEP_PANEL).pack(anchor="w", pady=(5, 0))
+        self.progress_bar = tk.Canvas(step_card, width=1, height=6, bg="#304b56", highlightthickness=0)
         self.progress_bar.pack(fill="x", pady=(12, 0))
-        self.progress_fill = self.progress_bar.create_rectangle(0, 0, 0, 4, fill=ACCENT, outline="")
+        self.progress_fill = self.progress_bar.create_rectangle(0, 0, 0, 6, fill=ACCENT, outline="")
         self.progress_bar.bind("<Configure>", lambda _event: self._paint_progress())
 
         actions = tk.Frame(self.root, bg=BG)
         actions.pack(fill="x", padx=20)
         self.capture_button = tk.Button(actions, text="开始抓包", command=self._begin_capture,
-                                        bg=ACCENT, fg=BG, activebackground="#82f2d1",
+                                        bg=ACCENT, fg=BG, activebackground="#82f2d1", activeforeground=BG,
+                                        disabledforeground="#25473f",
                                         relief="flat", bd=0, padx=16, pady=10,
                                         font=("Microsoft YaHei UI", 10, "bold"))
         self.capture_button.pack(side="left")
@@ -427,8 +431,12 @@ class GuideApp:
                                         padx=14, pady=8, font=("Microsoft YaHei UI", 10, "bold"))
         self.special_button.pack(fill="x", padx=20, pady=(10, 0))
 
-        tools_row = tk.Frame(self.root, bg=BG)
-        tools_row.pack(fill="x", padx=20, pady=(15, 0))
+        tk.Frame(self.root, bg=BORDER, height=1).pack(fill="x", padx=20, pady=(16, 12))
+        settings = tk.Frame(self.root, bg=BG, padx=12, pady=10,
+                            highlightthickness=1, highlightbackground=BORDER)
+        settings.pack(fill="x", padx=20)
+        tools_row = tk.Frame(settings, bg=BG)
+        tools_row.pack(fill="x")
         self.auto_button = tk.Button(tools_row, text="⟳ 重新自动对齐", command=self._request_auto_calibration,
                                      state="disabled", bg=BG, fg=ACCENT, relief="flat", bd=0,
                                      activebackground=BG, activeforeground="#8df5d7")
@@ -441,8 +449,8 @@ class GuideApp:
                                          bg=BG, fg=MUTED, relief="flat", bd=0,
                                          activebackground=BG, activeforeground=TEXT)
         self.advanced_button.pack(side="right")
-        timeout_row = tk.Frame(self.root, bg=BG)
-        timeout_row.pack(fill="x", padx=20, pady=(10, 0))
+        timeout_row = tk.Frame(settings, bg=BG)
+        timeout_row.pack(fill="x", pady=(10, 0))
         tk.Label(timeout_row, text="求解时限", bg=BG, fg=TEXT).pack(side="left")
         self.timeout_input = ttk.Combobox(timeout_row, textvariable=self.timeout_text,
                                          values=(20, 60, 120, 300, 600), width=7)
@@ -452,10 +460,10 @@ class GuideApp:
                                              bg=PANEL, fg=ACCENT, relief="flat", padx=12)
         self.timeout_apply_button.pack(side="left", padx=8)
         tk.Label(timeout_row, text="下次求解生效 · 自动记住", bg=BG, fg=MUTED).pack(side="left")
-        tk.Checkbutton(self.root, text="后台模拟点击（不占鼠标，窗口请勿最小化）",
+        tk.Checkbutton(settings, text="后台模拟点击（不占鼠标，窗口请勿最小化）",
                        variable=self.background_click, command=self._toggle_background_click,
                        bg=BG, fg=TEXT, selectcolor=PANEL, activebackground=BG,
-                       activeforeground=TEXT).pack(anchor="w", padx=20, pady=(8, 0))
+                       activeforeground=TEXT).pack(anchor="w", pady=(8, 0))
 
         self.advanced = tk.Frame(self.root, bg=PANEL, padx=12, pady=10)
         row = tk.Frame(self.advanced, bg=PANEL)
@@ -468,16 +476,18 @@ class GuideApp:
         self.calibrate_button = tk.Button(self.advanced, text="应用微调位置", command=self._toggle_calibration,
                                           bg="#314867", fg=TEXT, relief="flat", bd=0, padx=12, pady=6)
         self.calibrate_button.pack(anchor="w", pady=(8, 0))
-        tk.Label(self.root, text="自动点击默认关闭；支持取回移出牌，道具与复活需手动完成并确认。",
+        self.footer = tk.Frame(self.root, bg=BG)
+        self.footer.pack(fill="x", padx=20, pady=(14, 18))
+        tk.Label(self.footer, text="自动点击默认关闭；支持取回移出牌，道具与复活需手动完成并确认。",
                  wraplength=430, justify="left", font=("Microsoft YaHei UI", 9),
-                 fg=MUTED, bg=BG).pack(anchor="w", padx=20, pady=(18, 4))
-        tk.Label(self.root, text="若点错、换局或标记不准，请立即暂停。",
-                 font=("Microsoft YaHei UI", 9), fg="#ffaaa4", bg=BG).pack(anchor="w", padx=20)
+                 fg=MUTED, bg=BG).pack(anchor="w", pady=(0, 4))
+        tk.Label(self.footer, text="若点错、换局或标记不准，请立即暂停。",
+                 font=("Microsoft YaHei UI", 9), fg="#ffaaa4", bg=BG).pack(anchor="w")
 
     def _paint_progress(self) -> None:
         fraction = (self.guide.confirmed / len(self.guide.plan)
                     if self.guide is not None and self.guide.plan else 0.0)
-        self.progress_bar.coords(self.progress_fill, 0, 0, round(self.progress_bar.winfo_width() * fraction), 4)
+        self.progress_bar.coords(self.progress_fill, 0, 0, round(self.progress_bar.winfo_width() * fraction), 6)
 
     def _update_progress(self) -> None:
         self.progress_text.set(f"{self.guide.confirmed} / {len(self.guide.plan)} 步"
@@ -488,11 +498,9 @@ class GuideApp:
         if self.advanced.winfo_manager():
             self.advanced.pack_forget()
             self.advanced_button.configure(text="校准微调 ▾")
-            self.root.geometry("560x750")
         else:
-            self.advanced.pack(fill="x", padx=20, pady=(10, 0))
+            self.advanced.pack(fill="x", padx=20, pady=(10, 0), before=self.footer)
             self.advanced_button.configure(text="收起微调 ▴")
-            self.root.geometry("560x850")
 
     def _load_latest_capture(self) -> None:
         capture = find_captured_game(self.capture_dir, not_before=time.time() - 3600)
